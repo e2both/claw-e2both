@@ -200,13 +200,23 @@ fn discover_instruction_files(cwd: &Path) -> std::io::Result<Vec<ContextFile>> {
 
     let mut files = Vec::new();
     for dir in directories {
-        for candidate in [
-            dir.join("CLAUDE.md"),
-            dir.join("CLAUDE.local.md"),
-            dir.join(".claude").join("CLAUDE.md"),
-            dir.join(".claude").join("instructions.md"),
+        for (preferred, fallback) in [
+            (dir.join("CLAW.md"), dir.join("CLAUDE.md")),
+            (dir.join("CLAW.local.md"), dir.join("CLAUDE.local.md")),
+            (
+                dir.join(".claw").join("CLAW.md"),
+                dir.join(".claude").join("CLAUDE.md"),
+            ),
+            (
+                dir.join(".claw").join("instructions.md"),
+                dir.join(".claude").join("instructions.md"),
+            ),
         ] {
-            push_context_file(&mut files, candidate)?;
+            if preferred.exists() {
+                push_context_file(&mut files, preferred)?;
+            } else {
+                push_context_file(&mut files, fallback)?;
+            }
         }
     }
     Ok(dedupe_instruction_files(files))
@@ -282,7 +292,7 @@ fn render_project_context(project_context: &ProjectContext) -> String {
     ];
     if !project_context.instruction_files.is_empty() {
         bullets.push(format!(
-            "Claude instruction files discovered: {}.",
+            "Claw instruction files discovered: {}.",
             project_context.instruction_files.len()
         ));
     }
@@ -301,7 +311,7 @@ fn render_project_context(project_context: &ProjectContext) -> String {
 }
 
 fn render_instruction_files(files: &[ContextFile]) -> String {
-    let mut sections = vec!["# Claude instructions".to_string()];
+    let mut sections = vec!["# Claw instructions".to_string()];
     let mut remaining_chars = MAX_TOTAL_INSTRUCTION_CHARS;
     for file in files {
         if remaining_chars == 0 {
@@ -731,7 +741,7 @@ mod tests {
 
         assert!(prompt.contains("# System"));
         assert!(prompt.contains("# Project context"));
-        assert!(prompt.contains("# Claude instructions"));
+        assert!(prompt.contains("# Claw instructions"));
         assert!(prompt.contains("Project rules"));
         assert!(prompt.contains("permissionMode"));
         assert!(prompt.contains(SYSTEM_PROMPT_DYNAMIC_BOUNDARY));
@@ -776,7 +786,7 @@ mod tests {
             path: PathBuf::from("/tmp/project/CLAUDE.md"),
             content: "Project rules".to_string(),
         }]);
-        assert!(rendered.contains("# Claude instructions"));
+        assert!(rendered.contains("# Claw instructions"));
         assert!(rendered.contains("scope: /tmp/project"));
         assert!(rendered.contains("Project rules"));
     }

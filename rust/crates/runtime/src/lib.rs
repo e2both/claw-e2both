@@ -24,11 +24,12 @@ pub use compact::{
     get_compact_continuation_message, should_compact, CompactionConfig, CompactionResult,
 };
 pub use config::{
-    ConfigEntry, ConfigError, ConfigLoader, ConfigSource, McpClaudeAiProxyServerConfig,
-    McpConfigCollection, McpOAuthConfig, McpRemoteServerConfig, McpSdkServerConfig,
-    McpServerConfig, McpStdioServerConfig, McpTransport, McpWebSocketServerConfig, OAuthConfig,
-    ResolvedPermissionMode, RuntimeConfig, RuntimeFeatureConfig, RuntimeHookConfig,
-    ScopedMcpServerConfig, CLAUDE_CODE_SETTINGS_SCHEMA_NAME,
+    resolve_env_with_fallback, ConfigEntry, ConfigError, ConfigLoader, ConfigSource,
+    McpClaudeAiProxyServerConfig, McpConfigCollection, McpOAuthConfig, McpRemoteServerConfig,
+    McpSdkServerConfig, McpServerConfig, McpStdioServerConfig, McpTransport,
+    McpWebSocketServerConfig, OAuthConfig, ResolvedPermissionMode, RuntimeConfig,
+    RuntimeFeatureConfig, RuntimeHookConfig, ScopedMcpServerConfig,
+    CLAUDE_CODE_SETTINGS_SCHEMA_NAME,
 };
 pub use conversation::{
     auto_compaction_threshold_from_env, ApiClient, ApiRequest, AssistantEvent, AutoCompactionEvent,

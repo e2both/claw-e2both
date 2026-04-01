@@ -2592,11 +2592,22 @@ fn config_file_for_scope(scope: ConfigScope) -> Result<PathBuf, String> {
 }
 
 fn config_home_dir() -> Result<PathBuf, String> {
-    if let Ok(path) = std::env::var("CLAUDE_CONFIG_HOME") {
+    if let Some(path) = resolve_env_with_fallback("CLAW_CONFIG_HOME", "CLAUDE_CONFIG_HOME") {
         return Ok(PathBuf::from(path));
     }
     let home = std::env::var("HOME").map_err(|_| String::from("HOME is not set"))?;
-    Ok(PathBuf::from(home).join(".claude"))
+    let claw_path = PathBuf::from(&home).join(".claw");
+    if claw_path.exists() {
+        Ok(claw_path)
+    } else {
+        Ok(PathBuf::from(home).join(".claude"))
+    }
+}
+
+fn resolve_env_with_fallback(new_name: &str, legacy_name: &str) -> Option<String> {
+    std::env::var(new_name)
+        .ok()
+        .or_else(|| std::env::var(legacy_name).ok())
 }
 
 fn read_json_object(path: &Path) -> Result<serde_json::Map<String, Value>, String> {

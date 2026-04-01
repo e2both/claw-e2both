@@ -324,12 +324,19 @@ fn generate_random_token(bytes: usize) -> io::Result<String> {
 }
 
 fn credentials_home_dir() -> io::Result<PathBuf> {
-    if let Some(path) = std::env::var_os("CLAUDE_CONFIG_HOME") {
+    if let Some(path) =
+        crate::config::resolve_env_with_fallback("CLAW_CONFIG_HOME", "CLAUDE_CONFIG_HOME")
+    {
         return Ok(PathBuf::from(path));
     }
     let home = std::env::var_os("HOME")
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is not set"))?;
-    Ok(PathBuf::from(home).join(".claude"))
+    let claw_path = PathBuf::from(&home).join(".claw");
+    if claw_path.exists() {
+        Ok(claw_path)
+    } else {
+        Ok(PathBuf::from(home).join(".claude"))
+    }
 }
 
 fn read_credentials_root(path: &PathBuf) -> io::Result<Map<String, Value>> {
