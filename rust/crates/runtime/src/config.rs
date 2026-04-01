@@ -7,6 +7,7 @@ use crate::json::JsonValue;
 use crate::sandbox::{FilesystemIsolationMode, SandboxConfig};
 
 /// Resolve an environment variable, trying the new Claw name first, then the legacy Claude name.
+#[must_use]
 pub fn resolve_env_with_fallback(new_name: &str, legacy_name: &str) -> Option<String> {
     std::env::var(new_name)
         .ok()
@@ -218,10 +219,7 @@ impl ConfigLoader {
             },
             ConfigEntry {
                 source: ConfigSource::Project,
-                path: prefer_existing(
-                    &self.cwd.join(".claw.json"),
-                    &self.cwd.join(".claude.json"),
-                ),
+                path: prefer_existing(&self.cwd.join(".claw.json"), &self.cwd.join(".claude.json")),
             },
             ConfigEntry {
                 source: ConfigSource::Project,
@@ -444,8 +442,7 @@ fn read_optional_json_object(
     path: &Path,
 ) -> Result<Option<BTreeMap<String, JsonValue>>, ConfigError> {
     let file_name = path.file_name().and_then(|name| name.to_str());
-    let is_legacy_config =
-        file_name == Some(".claude.json") || file_name == Some(".claw.json");
+    let is_legacy_config = file_name == Some(".claude.json") || file_name == Some(".claw.json");
     let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -458,7 +455,7 @@ fn read_optional_json_object(
 
     let parsed = match JsonValue::parse(&contents) {
         Ok(parsed) => parsed,
-        Err(error) if is_legacy_config => return Ok(None),
+        Err(_error) if is_legacy_config => return Ok(None),
         Err(error) => return Err(ConfigError::Parse(format!("{}: {error}", path.display()))),
     };
     let Some(object) = parsed.as_object() else {

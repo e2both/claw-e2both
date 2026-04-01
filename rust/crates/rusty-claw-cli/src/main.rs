@@ -4,6 +4,7 @@ mod render;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
+use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::TcpListener;
@@ -1537,6 +1538,7 @@ impl LiveCli {
         Ok(())
     }
 
+    #[allow(clippy::unused_self)]
     fn run_teleport(&self, target: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         let Some(target) = target.map(str::trim).filter(|value| !value.is_empty()) else {
             println!("Usage: /teleport <symbol-or-path>");
@@ -1946,8 +1948,7 @@ fn render_memory_report() -> Result<String, Box<dyn std::error::Error>> {
     if project_context.instruction_files.is_empty() {
         lines.push("Discovered files".to_string());
         lines.push(
-            "  No CLAW instruction files discovered in the current directory ancestry."
-                .to_string(),
+            "  No CLAW instruction files discovered in the current directory ancestry.".to_string(),
         );
     } else {
         lines.push("Discovered files".to_string());
@@ -2645,7 +2646,7 @@ fn format_tool_call_start(name: &str, input: &str) -> String {
             let path = extract_tool_path(&parsed);
             let lines = parsed
                 .get("content")
-                .and_then(|value| value.as_str())
+                .and_then(serde_json::Value::as_str)
                 .map_or(0, |content| content.lines().count());
             format!("\x1b[1;32m✏️ Writing {path}\x1b[0m \x1b[2m({lines} lines)\x1b[0m")
         }
@@ -2654,12 +2655,12 @@ fn format_tool_call_start(name: &str, input: &str) -> String {
             let old_value = parsed
                 .get("old_string")
                 .or_else(|| parsed.get("oldString"))
-                .and_then(|value| value.as_str())
+                .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
             let new_value = parsed
                 .get("new_string")
                 .or_else(|| parsed.get("newString"))
-                .and_then(|value| value.as_str())
+                .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
             format!(
                 "\x1b[1;33m📝 Editing {path}\x1b[0m{}",
@@ -2672,7 +2673,7 @@ fn format_tool_call_start(name: &str, input: &str) -> String {
         "grep_search" | "Grep" => format_search_start("🔎 Grep", &parsed),
         "web_search" | "WebSearch" => parsed
             .get("query")
-            .and_then(|value| value.as_str())
+            .and_then(serde_json::Value::as_str)
             .unwrap_or("?")
             .to_string(),
         _ => summarize_tool_payload(input),
@@ -2720,7 +2721,7 @@ fn extract_tool_path(parsed: &serde_json::Value) -> String {
         .get("file_path")
         .or_else(|| parsed.get("filePath"))
         .or_else(|| parsed.get("path"))
-        .and_then(|value| value.as_str())
+        .and_then(serde_json::Value::as_str)
         .unwrap_or("?")
         .to_string()
 }
@@ -2728,11 +2729,11 @@ fn extract_tool_path(parsed: &serde_json::Value) -> String {
 fn format_search_start(label: &str, parsed: &serde_json::Value) -> String {
     let pattern = parsed
         .get("pattern")
-        .and_then(|value| value.as_str())
+        .and_then(serde_json::Value::as_str)
         .unwrap_or("?");
     let scope = parsed
         .get("path")
-        .and_then(|value| value.as_str())
+        .and_then(serde_json::Value::as_str)
         .unwrap_or(".");
     format!("{label} {pattern}\n\x1b[2min {scope}\x1b[0m")
 }
@@ -2751,7 +2752,7 @@ fn format_patch_preview(old_value: &str, new_value: &str) -> Option<String> {
 fn format_bash_call(parsed: &serde_json::Value) -> String {
     let command = parsed
         .get("command")
-        .and_then(|value| value.as_str())
+        .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
     if command.is_empty() {
         String::new()
@@ -2773,23 +2774,23 @@ fn format_bash_result(icon: &str, parsed: &serde_json::Value) -> String {
     let mut lines = vec![format!("{icon} \x1b[38;5;245mbash\x1b[0m")];
     if let Some(task_id) = parsed
         .get("backgroundTaskId")
-        .and_then(|value| value.as_str())
+        .and_then(serde_json::Value::as_str)
     {
-        lines[0].push_str(&format!(" backgrounded ({task_id})"));
+        write!(lines[0], " backgrounded ({task_id})").unwrap();
     } else if let Some(status) = parsed
         .get("returnCodeInterpretation")
-        .and_then(|value| value.as_str())
+        .and_then(serde_json::Value::as_str)
         .filter(|status| !status.is_empty())
     {
-        lines[0].push_str(&format!(" {status}"));
+        write!(lines[0], " {status}").unwrap();
     }
 
-    if let Some(stdout) = parsed.get("stdout").and_then(|value| value.as_str()) {
+    if let Some(stdout) = parsed.get("stdout").and_then(serde_json::Value::as_str) {
         if !stdout.trim().is_empty() {
             lines.push(stdout.trim_end().to_string());
         }
     }
-    if let Some(stderr) = parsed.get("stderr").and_then(|value| value.as_str()) {
+    if let Some(stderr) = parsed.get("stderr").and_then(serde_json::Value::as_str) {
         if !stderr.trim().is_empty() {
             lines.push(format!("\x1b[38;5;203m{}\x1b[0m", stderr.trim_end()));
         }
@@ -2803,19 +2804,19 @@ fn format_read_result(icon: &str, parsed: &serde_json::Value) -> String {
     let path = extract_tool_path(file);
     let start_line = file
         .get("startLine")
-        .and_then(|value| value.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(1);
     let num_lines = file
         .get("numLines")
-        .and_then(|value| value.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
     let total_lines = file
         .get("totalLines")
-        .and_then(|value| value.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(num_lines);
     let content = file
         .get("content")
-        .and_then(|value| value.as_str())
+        .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
     let end_line = start_line.saturating_add(num_lines.saturating_sub(1));
 
@@ -2832,13 +2833,12 @@ fn format_write_result(icon: &str, parsed: &serde_json::Value) -> String {
     let path = extract_tool_path(parsed);
     let kind = parsed
         .get("type")
-        .and_then(|value| value.as_str())
+        .and_then(serde_json::Value::as_str)
         .unwrap_or("write");
     let line_count = parsed
         .get("content")
-        .and_then(|value| value.as_str())
-        .map(|content| content.lines().count())
-        .unwrap_or(0);
+        .and_then(serde_json::Value::as_str)
+        .map_or(0, |content| content.lines().count());
     format!(
         "{icon} \x1b[1;32m✏️ {} {path}\x1b[0m \x1b[2m({line_count} lines)\x1b[0m",
         if kind == "create" { "Wrote" } else { "Updated" },
@@ -2869,7 +2869,7 @@ fn format_edit_result(icon: &str, parsed: &serde_json::Value) -> String {
     let path = extract_tool_path(parsed);
     let suffix = if parsed
         .get("replaceAll")
-        .and_then(|value| value.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
     {
         " (replace all)"
@@ -2879,11 +2879,11 @@ fn format_edit_result(icon: &str, parsed: &serde_json::Value) -> String {
     let preview = format_structured_patch_preview(parsed).or_else(|| {
         let old_value = parsed
             .get("oldString")
-            .and_then(|value| value.as_str())
+            .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
         let new_value = parsed
             .get("newString")
-            .and_then(|value| value.as_str())
+            .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
         format_patch_preview(old_value, new_value)
     });
@@ -2897,11 +2897,11 @@ fn format_edit_result(icon: &str, parsed: &serde_json::Value) -> String {
 fn format_glob_result(icon: &str, parsed: &serde_json::Value) -> String {
     let num_files = parsed
         .get("numFiles")
-        .and_then(|value| value.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
     let filenames = parsed
         .get("filenames")
-        .and_then(|value| value.as_array())
+        .and_then(serde_json::Value::as_array)
         .map(|files| {
             files
                 .iter()
@@ -2921,19 +2921,19 @@ fn format_glob_result(icon: &str, parsed: &serde_json::Value) -> String {
 fn format_grep_result(icon: &str, parsed: &serde_json::Value) -> String {
     let num_matches = parsed
         .get("numMatches")
-        .and_then(|value| value.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
     let num_files = parsed
         .get("numFiles")
-        .and_then(|value| value.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
     let content = parsed
         .get("content")
-        .and_then(|value| value.as_str())
+        .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
     let filenames = parsed
         .get("filenames")
-        .and_then(|value| value.as_array())
+        .and_then(serde_json::Value::as_array)
         .map(|files| {
             files
                 .iter()
