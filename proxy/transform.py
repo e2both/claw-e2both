@@ -31,6 +31,9 @@ def anthropic_to_openai_request(req: dict[str, Any]) -> dict[str, Any]:
     if stream:
         openai["stream_options"] = {"include_usage": True}
 
+    # Disable Qwen3 thinking mode via chat_template_kwargs
+    openai["chat_template_kwargs"] = {"enable_thinking": False}
+
     # Temperature / top_p passthrough
     if "temperature" in req:
         openai["temperature"] = req["temperature"]
@@ -60,7 +63,20 @@ def convert_messages(
 
     # System prompt becomes the first message
     if system:
-        out.append({"role": "system", "content": system})
+        # Append agent behavior instructions for local models
+        agent_suffix = (
+            "\n\n<CRITICAL INSTRUCTIONS>"
+            "\nYou are an autonomous coding agent. You MUST use the provided tools to complete tasks."
+            "\nDo NOT just describe what you would do - actually DO it by calling the appropriate tool."
+            "\nWhen asked to check something, use bash to run the command."
+            "\nWhen asked to create a file, use write_file."
+            "\nWhen asked to modify code, use edit_file."
+            "\nNEVER suggest code without executing it. ALWAYS call tools directly."
+            "\nDo NOT use <think> tags. Respond directly and concisely."
+            "\n</CRITICAL INSTRUCTIONS>"
+            "\n/no_think"
+        )
+        out.append({"role": "system", "content": system + agent_suffix})
 
     for msg in messages:
         role = msg.get("role", "user")
