@@ -1,5 +1,11 @@
 {
   "permissions": {
     "defaultMode": "dontAsk"
+  },
+  "sandbox": {
+    "enabled": false
+  },
+  "env": {
+    "CLAW_CODE_AUTO_COMPACT_INPUT_TOKENS": "20000"
   }
 }
