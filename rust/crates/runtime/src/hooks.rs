@@ -558,6 +558,93 @@ mod tests {
         assert_eq!(result.messages(), &["notified".to_string()]);
     }
 
+    #[test]
+    fn multiple_hooks_first_allows_second_denies() {
+        let runner = HookRunner::new(RuntimeHookConfig::new(
+            vec![
+                shell_snippet("printf 'first ok'"),
+                shell_snippet("printf 'second blocked'; exit 2"),
+            ],
+            Vec::new(),
+        ));
+
+        let result = runner.run_pre_tool_use("bash", r#"{"command":"pwd"}"#);
+
+        assert!(result.is_denied());
+        assert!(result.messages().iter().any(|m| m.contains("first ok")));
+        assert!(result
+            .messages()
+            .iter()
+            .any(|m| m.contains("second blocked")));
+    }
+
+    #[test]
+    fn hook_with_both_only_and_exclude_filters_correctly() {
+        // only_tool_names includes "bash" and "read_file", exclude_tool_names excludes "bash"
+        // So "bash" should be excluded (exclude wins), "read_file" should run, "other" should not.
+        let runner = HookRunner::new(RuntimeHookConfig::new_rich(
+            vec![HookEntryConfig::Rich(HookEntry {
+                command: shell_snippet("printf 'filtered'"),
+                only_tool_names: Some(vec!["bash".to_string(), "read_file".to_string()]),
+                exclude_tool_names: Some(vec!["bash".to_string()]),
+                ..HookEntry::default()
+            })],
+            Vec::new(),
+            Vec::new(),
+        ));
+
+        // "bash" is in only but also in exclude - should NOT run
+        let bash_result = runner.run_pre_tool_use("bash", r"{}");
+        assert!(!bash_result.is_denied());
+        assert!(bash_result.messages().is_empty());
+
+        // "read_file" is in only and NOT in exclude - should run
+        let read_result = runner.run_pre_tool_use("read_file", r"{}");
+        assert!(!read_result.is_denied());
+        assert_eq!(read_result.messages(), &["filtered".to_string()]);
+
+        // "other" is NOT in only - should NOT run
+        let other_result = runner.run_pre_tool_use("other", r"{}");
+        assert!(!other_result.is_denied());
+        assert!(other_result.messages().is_empty());
+    }
+
+    #[test]
+    fn notification_hook_fires_multiple_commands() {
+        let runner = HookRunner::new(RuntimeHookConfig::new_rich(
+            Vec::new(),
+            Vec::new(),
+            vec![
+                HookEntryConfig::Simple(shell_snippet("printf 'notif-1'")),
+                HookEntryConfig::Simple(shell_snippet("printf 'notif-2'")),
+            ],
+        ));
+
+        let result = runner.run_notification();
+
+        assert!(!result.is_denied());
+        assert_eq!(result.messages().len(), 2);
+        assert_eq!(result.messages()[0], "notif-1");
+        assert_eq!(result.messages()[1], "notif-2");
+    }
+
+    #[test]
+    fn empty_hook_list_is_noop() {
+        let runner = HookRunner::new(RuntimeHookConfig::new(Vec::new(), Vec::new()));
+
+        let pre = runner.run_pre_tool_use("any_tool", r"{}");
+        assert!(!pre.is_denied());
+        assert!(pre.messages().is_empty());
+
+        let post = runner.run_post_tool_use("any_tool", r"{}", "output", false);
+        assert!(!post.is_denied());
+        assert!(post.messages().is_empty());
+
+        let notif = runner.run_notification();
+        assert!(!notif.is_denied());
+        assert!(notif.messages().is_empty());
+    }
+
     #[cfg(windows)]
     fn shell_snippet(script: &str) -> String {
         script.replace('\'', "\"")

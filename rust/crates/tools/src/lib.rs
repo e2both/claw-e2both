@@ -341,6 +341,21 @@ mod tests {
 
     #[test]
     fn skill_loads_local_skill_prompt() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        // Create a temp skill directory with the expected skill file.
+        let dir = temp_path("skill-home");
+        let skill_dir = dir.join("skills").join("help");
+        fs::create_dir_all(&skill_dir).expect("create skill dir");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "# Help\nGuide on using oh-my-codex plugin\n",
+        )
+        .expect("write skill file");
+        std::env::set_var("CODEX_HOME", &dir);
+
         let result = execute_tool(
             "Skill",
             &json!({
@@ -375,6 +390,9 @@ mod tests {
             .as_str()
             .expect("path")
             .ends_with("/help/SKILL.md"));
+
+        std::env::remove_var("CODEX_HOME");
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -825,14 +843,21 @@ mod tests {
 
     #[test]
     fn bash_tool_reports_success_exit_failure_timeout_and_background() {
-        let success = execute_tool("bash", &json!({ "command": "printf 'hello'" }))
-            .expect("bash should succeed");
+        // Disable sandbox to avoid unshare permission errors in containerized CI.
+        let success = execute_tool(
+            "bash",
+            &json!({ "command": "printf 'hello'", "dangerouslyDisableSandbox": true }),
+        )
+        .expect("bash should succeed");
         let success_output: serde_json::Value = serde_json::from_str(&success).expect("json");
         assert_eq!(success_output["stdout"], "hello");
         assert_eq!(success_output["interrupted"], false);
 
-        let failure = execute_tool("bash", &json!({ "command": "printf 'oops' >&2; exit 7" }))
-            .expect("bash failure should still return structured output");
+        let failure = execute_tool(
+            "bash",
+            &json!({ "command": "printf 'oops' >&2; exit 7", "dangerouslyDisableSandbox": true }),
+        )
+        .expect("bash failure should still return structured output");
         let failure_output: serde_json::Value = serde_json::from_str(&failure).expect("json");
         assert_eq!(failure_output["returnCodeInterpretation"], "exit_code:7");
         assert!(failure_output["stderr"]
@@ -840,8 +865,11 @@ mod tests {
             .expect("stderr")
             .contains("oops"));
 
-        let timeout = execute_tool("bash", &json!({ "command": "sleep 1", "timeout": 10 }))
-            .expect("bash timeout should return output");
+        let timeout = execute_tool(
+            "bash",
+            &json!({ "command": "sleep 1", "timeout": 10, "dangerouslyDisableSandbox": true }),
+        )
+        .expect("bash timeout should return output");
         let timeout_output: serde_json::Value = serde_json::from_str(&timeout).expect("json");
         assert_eq!(timeout_output["interrupted"], true);
         assert_eq!(timeout_output["returnCodeInterpretation"], "timeout");
@@ -852,7 +880,7 @@ mod tests {
 
         let background = execute_tool(
             "bash",
-            &json!({ "command": "sleep 1", "run_in_background": true }),
+            &json!({ "command": "sleep 1", "run_in_background": true, "dangerouslyDisableSandbox": true }),
         )
         .expect("bash background should succeed");
         let background_output: serde_json::Value = serde_json::from_str(&background).expect("json");
