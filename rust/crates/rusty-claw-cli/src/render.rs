@@ -312,7 +312,7 @@ pub fn render_welcome_banner(model: &str, cwd: &str) -> String {
 // Tool result box drawing
 // ---------------------------------------------------------------------------
 
-/// Wrap tool output in box-drawing characters for visual separation.
+/// Wrap tool output in ASCII box for visual separation.
 /// If the output exceeds `collapse_threshold` lines, the middle is collapsed.
 #[must_use]
 pub fn box_tool_output(
@@ -326,11 +326,12 @@ pub fn box_tool_output(
     } else {
         "\x1b[31m\u{2717}\x1b[0m"
     };
-    let header_width = 40usize;
-    let name_len = tool_name.len() + 4;
-    let trail = "\u{2500}".repeat(header_width.saturating_sub(name_len));
+    let header_width = 38usize;
+    let trail = "-".repeat(header_width.saturating_sub(tool_name.len()));
 
-    let mut result = format!("\x1b[38;5;245m\u{250c}\u{2500} {tool_name} {trail}\x1b[0m\n");
+    let mut result = format!(
+        "\x1b[38;5;245m+-- {tool_name} {trail}\x1b[0m\n"
+    );
     let lines: Vec<&str> = output.lines().collect();
     let total = lines.len();
 
@@ -338,24 +339,24 @@ pub fn box_tool_output(
         let head_count = collapse_threshold / 2;
         let tail_count = 5.min(total);
         for line in &lines[..head_count] {
-            let _ = writeln!(result, "\x1b[38;5;245m\u{2502}\x1b[0m {line}");
+            let _ = writeln!(result, "\x1b[38;5;245m|\x1b[0m {line}");
         }
         let hidden = total.saturating_sub(head_count + tail_count);
         let _ = writeln!(
             result,
-            "\x1b[38;5;245m\u{2502}\x1b[0m \x1b[2m... ({hidden} more lines)\x1b[0m"
+            "\x1b[38;5;245m|\x1b[0m \x1b[2m... ({hidden} more lines)\x1b[0m"
         );
         for line in &lines[total.saturating_sub(tail_count)..] {
-            let _ = writeln!(result, "\x1b[38;5;245m\u{2502}\x1b[0m {line}");
+            let _ = writeln!(result, "\x1b[38;5;245m|\x1b[0m {line}");
         }
     } else {
         for line in &lines {
-            let _ = writeln!(result, "\x1b[38;5;245m\u{2502}\x1b[0m {line}");
+            let _ = writeln!(result, "\x1b[38;5;245m|\x1b[0m {line}");
         }
     }
 
-    let footer_trail = "\u{2500}".repeat(header_width.saturating_sub(2));
-    let _ = write!(result, "\x1b[38;5;245m\u{2514}{footer_trail}\x1b[0m {icon}");
+    let footer_trail = "-".repeat(header_width);
+    let _ = write!(result, "\x1b[38;5;245m+{footer_trail}\x1b[0m {icon}");
     result
 }
 

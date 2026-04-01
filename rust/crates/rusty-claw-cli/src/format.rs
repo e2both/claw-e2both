@@ -668,9 +668,9 @@ pub(crate) fn format_tool_call_start(name: &str, input: &str) -> String {
         _ => summarize_tool_payload(input),
     };
 
-    let border = "─".repeat(name.len() + 8);
+    let border = "-".repeat(name.len() + 4);
     format!(
-        "\x1b[38;5;245m╭─ \x1b[1;36m{name}\x1b[0;38;5;245m ─╮\x1b[0m\n\x1b[38;5;245m│\x1b[0m {detail}\n\x1b[38;5;245m╰{border}╯\x1b[0m"
+        "\x1b[38;5;245m[-- \x1b[1;36m{name}\x1b[0;38;5;245m --]\x1b[0m\n\x1b[38;5;245m|\x1b[0m {detail}\n\x1b[38;5;245m[{border}]\x1b[0m"
     )
 }
 
