@@ -39,7 +39,9 @@ pub(crate) struct NotebookEditOutput {
 }
 
 #[allow(clippy::too_many_lines)]
-pub(crate) fn execute_notebook_edit(input: NotebookEditInput) -> Result<NotebookEditOutput, String> {
+pub(crate) fn execute_notebook_edit(
+    input: NotebookEditInput,
+) -> Result<NotebookEditOutput, String> {
     let path = std::path::PathBuf::from(&input.notebook_path);
     if path.extension().and_then(|ext| ext.to_str()) != Some("ipynb") {
         return Err(String::from(

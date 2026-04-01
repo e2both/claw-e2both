@@ -895,7 +895,9 @@ pub(crate) struct PowerShellInput {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-pub(crate) fn execute_powershell(input: PowerShellInput) -> std::io::Result<runtime::BashCommandOutput> {
+pub(crate) fn execute_powershell(
+    input: PowerShellInput,
+) -> std::io::Result<runtime::BashCommandOutput> {
     let _ = &input.description;
     let shell = detect_powershell_shell()?;
     execute_shell_command(

@@ -171,6 +171,42 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         argument_hint: Some("[list|switch <session-id>]"),
         resume_supported: false,
     },
+    SlashCommandSpec {
+        name: "doctor",
+        summary: "Show environment diagnostics and health check",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "mcp",
+        summary: "List configured MCP servers",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "review",
+        summary: "Code review of staged git changes",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "project",
+        summary: "Show aggregated project context summary",
+        argument_hint: None,
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "theme",
+        summary: "Show or switch the color theme",
+        argument_hint: Some("[default|light|dark]"),
+        resume_supported: true,
+    },
+    SlashCommandSpec {
+        name: "undo",
+        summary: "Revert the last file modification",
+        argument_hint: None,
+        resume_supported: false,
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,6 +258,14 @@ pub enum SlashCommand {
         action: Option<String>,
         target: Option<String>,
     },
+    Doctor,
+    Mcp,
+    Review,
+    Project,
+    Theme {
+        name: Option<String>,
+    },
+    Undo,
     Unknown(String),
 }
 
@@ -283,6 +327,14 @@ impl SlashCommand {
                 action: parts.next().map(ToOwned::to_owned),
                 target: parts.next().map(ToOwned::to_owned),
             },
+            "doctor" => Self::Doctor,
+            "mcp" => Self::Mcp,
+            "review" => Self::Review,
+            "project" => Self::Project,
+            "theme" => Self::Theme {
+                name: parts.next().map(ToOwned::to_owned),
+            },
+            "undo" => Self::Undo,
             other => Self::Unknown(other.to_string()),
         })
     }
@@ -383,6 +435,12 @@ pub fn handle_slash_command(
         | SlashCommand::Version
         | SlashCommand::Export { .. }
         | SlashCommand::Session { .. }
+        | SlashCommand::Doctor
+        | SlashCommand::Mcp
+        | SlashCommand::Review
+        | SlashCommand::Project
+        | SlashCommand::Theme { .. }
+        | SlashCommand::Undo
         | SlashCommand::Unknown(_) => None,
     }
 }
@@ -396,6 +454,7 @@ mod tests {
     use runtime::{CompactionConfig, ContentBlock, ConversationMessage, MessageRole, Session};
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn parses_supported_slash_commands() {
         assert_eq!(SlashCommand::parse("/help"), Some(SlashCommand::Help));
         assert_eq!(SlashCommand::parse(" /status "), Some(SlashCommand::Status));
@@ -492,6 +551,21 @@ mod tests {
                 target: Some("abc123".to_string())
             })
         );
+        assert_eq!(SlashCommand::parse("/doctor"), Some(SlashCommand::Doctor));
+        assert_eq!(SlashCommand::parse("/mcp"), Some(SlashCommand::Mcp));
+        assert_eq!(SlashCommand::parse("/review"), Some(SlashCommand::Review));
+        assert_eq!(SlashCommand::parse("/project"), Some(SlashCommand::Project));
+        assert_eq!(
+            SlashCommand::parse("/theme dark"),
+            Some(SlashCommand::Theme {
+                name: Some("dark".to_string())
+            })
+        );
+        assert_eq!(
+            SlashCommand::parse("/theme"),
+            Some(SlashCommand::Theme { name: None })
+        );
+        assert_eq!(SlashCommand::parse("/undo"), Some(SlashCommand::Undo));
     }
 
     #[test]
@@ -520,8 +594,14 @@ mod tests {
         assert!(help.contains("/version"));
         assert!(help.contains("/export [file]"));
         assert!(help.contains("/session [list|switch <session-id>]"));
-        assert_eq!(slash_command_specs().len(), 22);
-        assert_eq!(resume_supported_slash_commands().len(), 11);
+        assert!(help.contains("/doctor"));
+        assert!(help.contains("/mcp"));
+        assert!(help.contains("/review"));
+        assert!(help.contains("/project"));
+        assert!(help.contains("/theme [default|light|dark]"));
+        assert!(help.contains("/undo"));
+        assert_eq!(slash_command_specs().len(), 28);
+        assert_eq!(resume_supported_slash_commands().len(), 15);
     }
 
     #[test]
@@ -618,5 +698,14 @@ mod tests {
         assert!(
             handle_slash_command("/session list", &session, CompactionConfig::default()).is_none()
         );
+        assert!(handle_slash_command("/doctor", &session, CompactionConfig::default()).is_none());
+        assert!(handle_slash_command("/mcp", &session, CompactionConfig::default()).is_none());
+        assert!(handle_slash_command("/review", &session, CompactionConfig::default()).is_none());
+        assert!(handle_slash_command("/project", &session, CompactionConfig::default()).is_none());
+        assert!(handle_slash_command("/theme", &session, CompactionConfig::default()).is_none());
+        assert!(
+            handle_slash_command("/theme dark", &session, CompactionConfig::default()).is_none()
+        );
+        assert!(handle_slash_command("/undo", &session, CompactionConfig::default()).is_none());
     }
 }

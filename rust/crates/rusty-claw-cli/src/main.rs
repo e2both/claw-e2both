@@ -42,10 +42,10 @@ use render::{MarkdownStreamState, Spinner, TerminalRenderer};
 use runtime::{
     clear_oauth_credentials, generate_pkce_pair, generate_state, load_system_prompt,
     parse_oauth_callback_request_target, save_oauth_credentials, ApiClient, ApiRequest,
-    AssistantEvent, CompactionConfig, ConfigLoader, ContentBlock, ConversationMessage,
-    ConversationRuntime, MessageRole, OAuthAuthorizationRequest, OAuthConfig,
-    OAuthTokenExchangeRequest, PermissionMode, PermissionPolicy, RuntimeError, Session, TokenUsage,
-    ToolError, ToolExecutor, UsageTracker,
+    AssistantEvent, CompactionConfig, ConfigLoader, ConfigSource, ContentBlock,
+    ConversationMessage, ConversationRuntime, McpServerConfig, McpTransport, MessageRole,
+    OAuthAuthorizationRequest, OAuthConfig, OAuthTokenExchangeRequest, PermissionMode,
+    PermissionPolicy, RuntimeError, Session, TokenUsage, ToolError, ToolExecutor, UsageTracker,
 };
 use serde_json::json;
 use tools::{execute_tool, mvp_tool_specs, ToolSpec};
@@ -300,9 +300,8 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
     }
 
     if wants_subagent {
-        let effective_model = subagent_model
-            .map(|m| resolve_model_alias(&m).to_string())
-            .unwrap_or_else(|| model.clone());
+        let effective_model =
+            subagent_model.map_or_else(|| model.clone(), |m| resolve_model_alias(&m).to_string());
         return Ok(CliAction::Subagent {
             model: effective_model,
             max_duration_ms,
@@ -668,7 +667,7 @@ fn run_subagent(
         Err(error) => {
             let result = json!({
                 "status": "error",
-                "output": error.to_string(),
+                "output": error.clone(),
                 "usage": { "input_tokens": 0, "output_tokens": 0 }
             });
             println!("{}", serde_json::to_string(&result)?);
@@ -909,7 +908,25 @@ fn run_resume_command(
         | SlashCommand::Model { .. }
         | SlashCommand::Permissions { .. }
         | SlashCommand::Session { .. }
+        | SlashCommand::Review
+        | SlashCommand::Undo
         | SlashCommand::Unknown(_) => Err("unsupported resumed slash command".into()),
+        SlashCommand::Doctor => Ok(ResumeCommandOutcome {
+            session: session.clone(),
+            message: Some("Use /doctor in interactive mode for full diagnostics.".to_string()),
+        }),
+        SlashCommand::Mcp => Ok(ResumeCommandOutcome {
+            session: session.clone(),
+            message: Some("Use /mcp in interactive mode for MCP server listing.".to_string()),
+        }),
+        SlashCommand::Project => Ok(ResumeCommandOutcome {
+            session: session.clone(),
+            message: Some("Use /project in interactive mode for project summary.".to_string()),
+        }),
+        SlashCommand::Theme { .. } => Ok(ResumeCommandOutcome {
+            session: session.clone(),
+            message: Some("Use /theme in interactive mode.".to_string()),
+        }),
     }
 }
 
@@ -968,7 +985,7 @@ struct LiveCli {
     runtime: ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>,
     session: SessionHandle,
     current_theme: String,
-    last_undo: Option<UndoEntry>,
+    undo_tracker: SharedUndoTracker,
 }
 
 impl LiveCli {
@@ -980,7 +997,8 @@ impl LiveCli {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let system_prompt = build_system_prompt()?;
         let session = create_managed_session_handle()?;
-        let runtime = build_runtime(
+        let undo_tracker: SharedUndoTracker = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let runtime = build_runtime_with_undo(
             Session::new(),
             model.clone(),
             system_prompt.clone(),
@@ -988,6 +1006,7 @@ impl LiveCli {
             true,
             allowed_tools.clone(),
             permission_mode,
+            undo_tracker.clone(),
         )?;
         let cli = Self {
             model,
@@ -997,7 +1016,7 @@ impl LiveCli {
             runtime,
             session,
             current_theme: "default".to_string(),
-            last_undo: None,
+            undo_tracker,
         };
         cli.persist_session()?;
         Ok(cli)
@@ -1079,15 +1098,7 @@ impl LiveCli {
 
     fn run_prompt_json(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
         let session = self.runtime.session().clone();
-        let mut runtime = build_runtime(
-            session,
-            self.model.clone(),
-            self.system_prompt.clone(),
-            true,
-            false,
-            self.allowed_tools.clone(),
-            self.permission_mode,
-        )?;
+        let mut runtime = self.rebuild_runtime(session, self.model.clone(), true, false)?;
         let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
         let summary = runtime.run_turn(input, Some(&mut permission_prompter))?;
         self.runtime = runtime;
@@ -1115,6 +1126,7 @@ impl LiveCli {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn handle_repl_command(
         &mut self,
         command: SlashCommand,
@@ -1212,7 +1224,7 @@ impl LiveCli {
                 false
             }
             SlashCommand::Theme { name } => {
-                self.run_theme(name.as_deref())?;
+                self.run_theme(name.as_deref());
                 false
             }
             SlashCommand::Undo => {
@@ -1224,6 +1236,28 @@ impl LiveCli {
                 false
             }
         })
+    }
+
+    fn rebuild_runtime(
+        &self,
+        session: Session,
+        model: String,
+        enable_tools: bool,
+        emit_output: bool,
+    ) -> Result<
+        ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>,
+        Box<dyn std::error::Error>,
+    > {
+        build_runtime_with_undo(
+            session,
+            model,
+            self.system_prompt.clone(),
+            enable_tools,
+            emit_output,
+            self.allowed_tools.clone(),
+            self.permission_mode,
+            self.undo_tracker.clone(),
+        )
     }
 
     fn persist_session(&self) -> Result<(), Box<dyn std::error::Error>> {
@@ -1281,15 +1315,7 @@ impl LiveCli {
         let previous = self.model.clone();
         let session = self.runtime.session().clone();
         let message_count = session.messages.len();
-        self.runtime = build_runtime(
-            session,
-            model.clone(),
-            self.system_prompt.clone(),
-            true,
-            true,
-            self.allowed_tools.clone(),
-            self.permission_mode,
-        )?;
+        self.runtime = self.rebuild_runtime(session, model.clone(), true, true)?;
         self.model.clone_from(&model);
         println!(
             "{}",
@@ -1324,15 +1350,7 @@ impl LiveCli {
         let previous = self.permission_mode.as_str().to_string();
         let session = self.runtime.session().clone();
         self.permission_mode = permission_mode_from_label(normalized);
-        self.runtime = build_runtime(
-            session,
-            self.model.clone(),
-            self.system_prompt.clone(),
-            true,
-            true,
-            self.allowed_tools.clone(),
-            self.permission_mode,
-        )?;
+        self.runtime = self.rebuild_runtime(session, self.model.clone(), true, true)?;
         println!(
             "{}",
             format_permissions_switch_report(&previous, normalized)
@@ -1349,15 +1367,7 @@ impl LiveCli {
         }
 
         self.session = create_managed_session_handle()?;
-        self.runtime = build_runtime(
-            Session::new(),
-            self.model.clone(),
-            self.system_prompt.clone(),
-            true,
-            true,
-            self.allowed_tools.clone(),
-            self.permission_mode,
-        )?;
+        self.runtime = self.rebuild_runtime(Session::new(), self.model.clone(), true, true)?;
         println!(
             "Session cleared\n  Mode             fresh session\n  Preserved model  {}\n  Permission mode  {}\n  Session          {}",
             self.model,
@@ -1384,15 +1394,7 @@ impl LiveCli {
         let handle = resolve_session_reference(&session_ref)?;
         let session = Session::load_from_path(&handle.path)?;
         let message_count = session.messages.len();
-        self.runtime = build_runtime(
-            session,
-            self.model.clone(),
-            self.system_prompt.clone(),
-            true,
-            true,
-            self.allowed_tools.clone(),
-            self.permission_mode,
-        )?;
+        self.runtime = self.rebuild_runtime(session, self.model.clone(), true, true)?;
         self.session = handle;
         println!(
             "{}",
@@ -1456,15 +1458,7 @@ impl LiveCli {
                 let handle = resolve_session_reference(target)?;
                 let session = Session::load_from_path(&handle.path)?;
                 let message_count = session.messages.len();
-                self.runtime = build_runtime(
-                    session,
-                    self.model.clone(),
-                    self.system_prompt.clone(),
-                    true,
-                    true,
-                    self.allowed_tools.clone(),
-                    self.permission_mode,
-                )?;
+                self.runtime = self.rebuild_runtime(session, self.model.clone(), true, true)?;
                 self.session = handle;
                 println!(
                     "Session switched\n  Active session   {}\n  File             {}\n  Messages         {}",
@@ -1486,17 +1480,232 @@ impl LiveCli {
         let removed = result.removed_message_count;
         let kept = result.compacted_session.messages.len();
         let skipped = removed == 0;
-        self.runtime = build_runtime(
-            result.compacted_session,
-            self.model.clone(),
-            self.system_prompt.clone(),
-            true,
-            true,
-            self.allowed_tools.clone(),
-            self.permission_mode,
-        )?;
+        self.runtime =
+            self.rebuild_runtime(result.compacted_session, self.model.clone(), true, true)?;
         self.persist_session()?;
         println!("{}", format_compact_report(removed, kept, skipped));
+        Ok(())
+    }
+
+    fn run_doctor(&self) {
+        let rustc_version = Command::new("rustc")
+            .arg("--version")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map_or_else(
+                || "not found".to_string(),
+                |o| String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            );
+        let git_version = Command::new("git")
+            .arg("--version")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map_or_else(
+                || "not found".to_string(),
+                |o| String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            );
+        let api_key = env::var("ANTHROPIC_API_KEY").ok().map_or_else(
+            || "not set".to_string(),
+            |k| {
+                if k.len() >= 8 {
+                    format!("{}...", &k[..8])
+                } else {
+                    "set (short)".to_string()
+                }
+            },
+        );
+        let oauth_path = env::var("HOME").map_or_else(
+            |_| PathBuf::from("~/.claude/credentials.json"),
+            |h| PathBuf::from(h).join(".claude").join("credentials.json"),
+        );
+        let oauth_status = if oauth_path.exists() {
+            format!("found ({})", oauth_path.display())
+        } else {
+            "not found".to_string()
+        };
+        let cwd = env::current_dir()
+            .map_or_else(|_| "<unknown>".to_string(), |p| p.display().to_string());
+        let claw_md = if Path::new("CLAW.md").exists() || Path::new("CLAUDE.md").exists() {
+            "found"
+        } else {
+            "not found"
+        };
+        let claw_json = if Path::new(".claw.json").exists() || Path::new(".claude.json").exists() {
+            "found"
+        } else {
+            "not found"
+        };
+        println!(
+            "Claw Code Diagnostics\n{}\nBinary:     claw v{VERSION}\nRust:       {rustc_version}\nGit:        {git_version}\nAPI Key:    {api_key}\nOAuth:      {oauth_status}\nModel:      {}\nCWD:        {cwd}\nCLAW.md:    {claw_md}\n.claw.json: {claw_json}",
+            "\u{2500}".repeat(21),
+            self.model,
+        );
+    }
+
+    fn run_mcp() -> Result<(), Box<dyn std::error::Error>> {
+        let cwd = env::current_dir()?;
+        let loader = ConfigLoader::default_for(&cwd);
+        let config = loader.load()?;
+        let servers = config.mcp().servers();
+        if servers.is_empty() {
+            println!("MCP Servers\n{}\n(none configured)", "\u{2500}".repeat(11));
+            return Ok(());
+        }
+        let mut lines = vec!["MCP Servers".to_string(), "\u{2500}".repeat(11)];
+        for (name, scoped) in servers {
+            let transport = match scoped.transport() {
+                McpTransport::Stdio => "stdio",
+                McpTransport::Sse => "sse",
+                McpTransport::Http => "http",
+                McpTransport::Ws => "ws",
+                McpTransport::Sdk => "sdk",
+                McpTransport::ClaudeAiProxy => "proxy",
+            };
+            let detail = match &scoped.config {
+                McpServerConfig::Stdio(c) => {
+                    format!("command: {} {}", c.command, c.args.join(" "))
+                }
+                McpServerConfig::Sse(c) | McpServerConfig::Http(c) => {
+                    format!("url: {}", c.url)
+                }
+                McpServerConfig::Ws(c) => format!("url: {}", c.url),
+                McpServerConfig::Sdk(c) => format!("name: {}", c.name),
+                McpServerConfig::ClaudeAiProxy(c) => format!("url: {}", c.url),
+            };
+            let scope = match scoped.scope {
+                ConfigSource::Project => "project",
+                ConfigSource::User => "user",
+                ConfigSource::Local => "local",
+            };
+            lines.push(format!("{name:<16} {transport:<8} {detail:<40} ({scope})"));
+        }
+        println!("{}", lines.join("\n"));
+        Ok(())
+    }
+
+    fn run_review(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let output = Command::new("git")
+            .args(["diff", "--staged"])
+            .current_dir(env::current_dir()?)
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(format!("git diff --staged failed: {stderr}").into());
+        }
+        let diff = String::from_utf8(output.stdout)?;
+        if diff.trim().is_empty() {
+            println!("No staged changes to review");
+            return Ok(());
+        }
+        let prompt = format!(
+            "Please review the following staged changes and provide feedback on code quality, potential bugs, and suggestions:\n\n```diff\n{}\n```",
+            truncate_for_prompt(&diff, 20_000)
+        );
+        println!("{}", self.run_internal_prompt_text(&prompt, false)?);
+        Ok(())
+    }
+
+    fn run_project(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let cwd = env::current_dir()?;
+        let branch = Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(&cwd)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map_or_else(
+                || "N/A".to_string(),
+                |o| String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            );
+        let dirty = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&cwd)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map_or("unknown", |o| {
+                if String::from_utf8_lossy(&o.stdout).trim().is_empty() {
+                    "clean"
+                } else {
+                    "dirty"
+                }
+            });
+        let git_info = format!("{branch} ({dirty})");
+        let claw_md = if Path::new("CLAW.md").exists() {
+            let content = fs::read_to_string("CLAW.md").unwrap_or_default();
+            format!("found ({} lines)", content.lines().count())
+        } else if Path::new("CLAUDE.md").exists() {
+            let content = fs::read_to_string("CLAUDE.md").unwrap_or_default();
+            format!("found ({} lines)", content.lines().count())
+        } else {
+            "not found".to_string()
+        };
+        let config_status =
+            if Path::new(".claw.json").exists() || Path::new(".claude.json").exists() {
+                "loaded"
+            } else {
+                "not found"
+            };
+        let loader = ConfigLoader::default_for(&cwd);
+        let mcp_count = loader.load().map(|c| c.mcp().servers().len()).unwrap_or(0);
+        let tool_count = mvp_tool_specs().len();
+        println!(
+            "Project Summary\n{}\nDirectory:   {}\nGit Branch:  {git_info}\nCLAW.md:     {claw_md}\nConfig:      {config_status}\nMCP Servers: {mcp_count} configured\nTools:       {tool_count} available\nModel:       {}",
+            "\u{2500}".repeat(15),
+            cwd.display(),
+            self.model,
+        );
+        Ok(())
+    }
+
+    fn run_theme(&mut self, name: Option<&str>) {
+        let Some(name) = name else {
+            println!("Current theme: {}", self.current_theme);
+            println!("Available themes: default, light, dark");
+            return;
+        };
+        if render::ColorTheme::from_name(name).is_none() {
+            println!("Unknown theme '{name}'. Available themes: default, light, dark");
+            return;
+        }
+        self.current_theme = name.to_string();
+        println!("Theme switched to '{name}'");
+    }
+
+    fn run_undo(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let entry = self
+            .undo_tracker
+            .lock()
+            .map_err(|e| format!("undo tracker lock failed: {e}"))?
+            .take();
+        let Some(entry) = entry else {
+            println!("Nothing to undo");
+            return Ok(());
+        };
+        match &entry.original_content {
+            Some(content) => {
+                fs::write(&entry.path, content)?;
+                println!(
+                    "Undo\n  Reverted         {}\n  Operation        {}",
+                    entry.path.display(),
+                    entry.operation,
+                );
+            }
+            None => {
+                if entry.path.exists() {
+                    fs::remove_file(&entry.path)?;
+                    println!(
+                        "Undo\n  Removed          {}\n  Operation        {} (file was newly created)",
+                        entry.path.display(),
+                        entry.operation,
+                    );
+                } else {
+                    println!("Undo\n  File already removed: {}", entry.path.display());
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1506,15 +1715,7 @@ impl LiveCli {
         enable_tools: bool,
     ) -> Result<String, Box<dyn std::error::Error>> {
         let session = self.runtime.session().clone();
-        let mut runtime = build_runtime(
-            session,
-            self.model.clone(),
-            self.system_prompt.clone(),
-            enable_tools,
-            false,
-            self.allowed_tools.clone(),
-            self.permission_mode,
-        )?;
+        let mut runtime = self.rebuild_runtime(session, self.model.clone(), enable_tools, false)?;
         let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
         let summary = runtime.run_turn(prompt, Some(&mut permission_prompter))?;
         Ok(final_assistant_text(&summary).trim().to_string())
@@ -1703,10 +1904,34 @@ fn build_runtime(
     permission_mode: PermissionMode,
 ) -> Result<ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>, Box<dyn std::error::Error>>
 {
+    build_runtime_with_undo(
+        session,
+        model,
+        system_prompt,
+        enable_tools,
+        emit_output,
+        allowed_tools,
+        permission_mode,
+        std::sync::Arc::new(std::sync::Mutex::new(None)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_runtime_with_undo(
+    session: Session,
+    model: String,
+    system_prompt: Vec<String>,
+    enable_tools: bool,
+    emit_output: bool,
+    allowed_tools: Option<AllowedToolSet>,
+    permission_mode: PermissionMode,
+    undo_tracker: SharedUndoTracker,
+) -> Result<ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>, Box<dyn std::error::Error>>
+{
     Ok(ConversationRuntime::new_with_features(
         session,
         AnthropicRuntimeClient::new(model, enable_tools, emit_output, allowed_tools.clone())?,
-        CliToolExecutor::new(allowed_tools, emit_output),
+        CliToolExecutor::new(allowed_tools, emit_output, undo_tracker),
         permission_policy(permission_mode),
         system_prompt,
         build_runtime_feature_config()?,
@@ -2060,18 +2285,44 @@ fn response_to_events(
     Ok(events)
 }
 
+type SharedUndoTracker = std::sync::Arc<std::sync::Mutex<Option<UndoEntry>>>;
+
 struct CliToolExecutor {
     renderer: TerminalRenderer,
     emit_output: bool,
     allowed_tools: Option<AllowedToolSet>,
+    undo_tracker: SharedUndoTracker,
 }
 
 impl CliToolExecutor {
-    fn new(allowed_tools: Option<AllowedToolSet>, emit_output: bool) -> Self {
+    fn new(
+        allowed_tools: Option<AllowedToolSet>,
+        emit_output: bool,
+        undo_tracker: SharedUndoTracker,
+    ) -> Self {
         Self {
             renderer: TerminalRenderer::new(),
             emit_output,
             allowed_tools,
+            undo_tracker,
+        }
+    }
+
+    fn track_file_operation(&self, tool_name: &str, input: &serde_json::Value) {
+        if !matches!(tool_name, "write_file" | "edit_file") {
+            return;
+        }
+        let Some(path_str) = input.get("path").and_then(|v| v.as_str()) else {
+            return;
+        };
+        let path = PathBuf::from(path_str);
+        let original_content = fs::read_to_string(&path).ok();
+        if let Ok(mut tracker) = self.undo_tracker.lock() {
+            *tracker = Some(UndoEntry {
+                path,
+                original_content,
+                operation: tool_name.to_string(),
+            });
         }
     }
 }
@@ -2087,8 +2338,9 @@ impl ToolExecutor for CliToolExecutor {
                 "tool `{tool_name}` is not enabled by the current --allowedTools setting"
             )));
         }
-        let value = serde_json::from_str(input)
+        let value: serde_json::Value = serde_json::from_str(input)
             .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
+        self.track_file_operation(tool_name, &value);
         match execute_tool(tool_name, &value) {
             Ok(output) => {
                 if self.emit_output {
@@ -2534,7 +2786,7 @@ mod tests {
             names,
             vec![
                 "help", "status", "compact", "clear", "cost", "config", "memory", "init", "diff",
-                "version", "export",
+                "version", "export", "doctor", "mcp", "project", "theme",
             ]
         );
     }

@@ -44,6 +44,52 @@ impl Default for ColorTheme {
     }
 }
 
+impl ColorTheme {
+    #[must_use]
+    pub fn dark() -> Self {
+        Self {
+            heading: Color::Cyan,
+            emphasis: Color::Magenta,
+            strong: Color::Yellow,
+            inline_code: Color::Green,
+            link: Color::Blue,
+            quote: Color::DarkGrey,
+            table_border: Color::DarkCyan,
+            code_block_border: Color::DarkGrey,
+            spinner_active: Color::Blue,
+            spinner_done: Color::Green,
+            spinner_failed: Color::Red,
+        }
+    }
+
+    #[must_use]
+    pub fn light() -> Self {
+        Self {
+            heading: Color::DarkBlue,
+            emphasis: Color::DarkMagenta,
+            strong: Color::DarkRed,
+            inline_code: Color::DarkGreen,
+            link: Color::DarkBlue,
+            quote: Color::Grey,
+            table_border: Color::DarkCyan,
+            code_block_border: Color::Grey,
+            spinner_active: Color::DarkBlue,
+            spinner_done: Color::DarkGreen,
+            spinner_failed: Color::DarkRed,
+        }
+    }
+
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "default" => Some(Self::default()),
+            "dark" => Some(Self::dark()),
+            "light" => Some(Self::light()),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Spinner {
     frame_index: usize,
@@ -245,6 +291,11 @@ impl TerminalRenderer {
     #[must_use]
     pub fn color_theme(&self) -> &ColorTheme {
         &self.color_theme
+    }
+
+    #[allow(dead_code)]
+    pub fn set_color_theme(&mut self, theme: ColorTheme) {
+        self.color_theme = theme;
     }
 
     #[must_use]
