@@ -1,9 +1,10 @@
 use std::fmt::Write as FmtWrite;
 use std::io::{self, Write};
+use std::time::Instant;
 
 use crossterm::cursor::{MoveToColumn, RestorePosition, SavePosition};
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor, Stylize};
-use crossterm::terminal::{Clear, ClearType};
+use crossterm::terminal::{self, Clear, ClearType};
 use crossterm::{execute, queue};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use syntect::easy::HighlightLines;
@@ -159,6 +160,203 @@ impl Spinner {
         )?;
         out.flush()
     }
+}
+
+// ---------------------------------------------------------------------------
+// StatusBar
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct StatusBar {
+    model: String,
+    input_tokens: u64,
+    output_tokens: u64,
+    max_tokens: u64,
+    cost_cents: f64,
+    session_id: Option<String>,
+}
+
+impl StatusBar {
+    #[must_use]
+    pub fn new(model: &str, max_tokens: u64) -> Self {
+        Self {
+            model: model.to_string(),
+            input_tokens: 0,
+            output_tokens: 0,
+            max_tokens,
+            cost_cents: 0.0,
+            session_id: None,
+        }
+    }
+
+    pub fn set_session_id(&mut self, id: &str) {
+        self.session_id = Some(id.to_string());
+    }
+
+    #[allow(dead_code)]
+    pub fn set_model(&mut self, model: &str) {
+        self.model = model.to_string();
+    }
+
+    pub fn update_usage(&mut self, input: u64, output: u64) {
+        self.input_tokens = self.input_tokens.saturating_add(input);
+        self.output_tokens = self.output_tokens.saturating_add(output);
+    }
+
+    #[allow(dead_code)]
+    pub fn update_cost(&mut self, cents: f64) {
+        self.cost_cents += cents;
+    }
+
+    #[must_use]
+    pub fn render(&self) -> String {
+        let total = self.input_tokens + self.output_tokens;
+        let tokens_display = format_token_count(total);
+        let max_display = format_token_count(self.max_tokens);
+        let cost_display = format!("${:.2}", self.cost_cents / 100.0);
+        let session_display = self.session_id.as_deref().map_or_else(String::new, |id| {
+            let short = if id.len() > 6 { &id[..6] } else { id };
+            format!(" | session: {short}")
+        });
+
+        format!(
+            "\x1b[48;5;236;37m [claw] model: {} | tokens: {}/{} | cost: {}{} \x1b[0m",
+            self.model, tokens_display, max_display, cost_display, session_display
+        )
+    }
+
+    pub fn render_to(&self, out: &mut impl Write) -> io::Result<()> {
+        let (_, rows) = terminal::size().unwrap_or((80, 24));
+        let bar = self.render();
+        queue!(
+            out,
+            crossterm::cursor::SavePosition,
+            crossterm::cursor::MoveTo(0, rows.saturating_sub(1)),
+            Clear(ClearType::CurrentLine),
+            Print(&bar),
+            crossterm::cursor::RestorePosition
+        )?;
+        out.flush()
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn format_token_count(count: u64) -> String {
+    if count >= 1_000_000 {
+        format!("{:.1}M", count as f64 / 1_000_000.0)
+    } else if count >= 1_000 {
+        format!("{:.1}k", count as f64 / 1_000.0)
+    } else {
+        format!("{count}")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ToolProgress
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct ToolProgress {
+    spinner: Spinner,
+    tool_name: String,
+    start_time: Instant,
+}
+
+#[allow(dead_code)]
+impl ToolProgress {
+    #[must_use]
+    pub fn new(tool_name: &str) -> Self {
+        Self {
+            spinner: Spinner::new(),
+            tool_name: tool_name.to_string(),
+            start_time: Instant::now(),
+        }
+    }
+
+    pub fn tick(&mut self, theme: &ColorTheme, out: &mut impl Write) -> io::Result<()> {
+        let elapsed = self.start_time.elapsed().as_secs_f64();
+        let label = format!("Running {}... ({:.1}s)", self.tool_name, elapsed);
+        self.spinner.tick(&label, theme, out)
+    }
+
+    pub fn finish_success(&mut self, theme: &ColorTheme, out: &mut impl Write) -> io::Result<()> {
+        let elapsed = self.start_time.elapsed().as_secs_f64();
+        let label = format!("{} completed ({:.1}s)", self.tool_name, elapsed);
+        self.spinner.finish(&label, theme, out)
+    }
+
+    pub fn finish_error(&mut self, theme: &ColorTheme, out: &mut impl Write) -> io::Result<()> {
+        let elapsed = self.start_time.elapsed().as_secs_f64();
+        let label = format!("{} failed ({:.1}s)", self.tool_name, elapsed);
+        self.spinner.fail(&label, theme, out)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Welcome banner
+// ---------------------------------------------------------------------------
+
+#[must_use]
+#[allow(dead_code)]
+pub fn render_welcome_banner(model: &str, cwd: &str) -> String {
+    format!(
+        "\x1b[1;36m\u{1f99e} Claw Code\x1b[0m v{}\n\
+         \x1b[2mModel: {model} | CWD: {cwd}\x1b[0m\n\
+         \x1b[2mType /help for commands, Ctrl+C to cancel, Ctrl+D to exit\x1b[0m\n",
+        env!("CARGO_PKG_VERSION"),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Tool result box drawing
+// ---------------------------------------------------------------------------
+
+/// Wrap tool output in box-drawing characters for visual separation.
+/// If the output exceeds `collapse_threshold` lines, the middle is collapsed.
+#[must_use]
+pub fn box_tool_output(
+    tool_name: &str,
+    output: &str,
+    success: bool,
+    collapse_threshold: usize,
+) -> String {
+    let icon = if success {
+        "\x1b[32m\u{2713}\x1b[0m"
+    } else {
+        "\x1b[31m\u{2717}\x1b[0m"
+    };
+    let header_width = 40usize;
+    let name_len = tool_name.len() + 4;
+    let trail = "\u{2500}".repeat(header_width.saturating_sub(name_len));
+
+    let mut result = format!("\x1b[38;5;245m\u{250c}\u{2500} {tool_name} {trail}\x1b[0m\n");
+    let lines: Vec<&str> = output.lines().collect();
+    let total = lines.len();
+
+    if total > collapse_threshold {
+        let head_count = collapse_threshold / 2;
+        let tail_count = 5.min(total);
+        for line in &lines[..head_count] {
+            let _ = writeln!(result, "\x1b[38;5;245m\u{2502}\x1b[0m {line}");
+        }
+        let hidden = total.saturating_sub(head_count + tail_count);
+        let _ = writeln!(
+            result,
+            "\x1b[38;5;245m\u{2502}\x1b[0m \x1b[2m... ({hidden} more lines)\x1b[0m"
+        );
+        for line in &lines[total.saturating_sub(tail_count)..] {
+            let _ = writeln!(result, "\x1b[38;5;245m\u{2502}\x1b[0m {line}");
+        }
+    } else {
+        for line in &lines {
+            let _ = writeln!(result, "\x1b[38;5;245m\u{2502}\x1b[0m {line}");
+        }
+    }
+
+    let footer_trail = "\u{2500}".repeat(header_width.saturating_sub(2));
+    let _ = write!(result, "\x1b[38;5;245m\u{2514}{footer_trail}\x1b[0m {icon}");
+    result
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -844,5 +1042,68 @@ mod tests {
 
         let output = String::from_utf8_lossy(&out);
         assert!(output.contains("Working"));
+    }
+
+    #[test]
+    fn status_bar_renders_with_model_and_tokens() {
+        let mut bar = super::StatusBar::new("opus-4.6", 32_000);
+        bar.set_session_id("abc12345");
+        bar.update_usage(500, 200);
+        bar.update_cost(5.0);
+        let rendered = bar.render();
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("model: opus-4.6"));
+        assert!(plain.contains("tokens:"));
+        assert!(plain.contains("cost:"));
+        assert!(plain.contains("session: abc123"));
+    }
+
+    #[test]
+    fn status_bar_formats_large_token_counts() {
+        assert_eq!(super::format_token_count(500), "500");
+        assert_eq!(super::format_token_count(1_200), "1.2k");
+        assert_eq!(super::format_token_count(2_500_000), "2.5M");
+    }
+
+    #[test]
+    fn tool_progress_tick_shows_tool_name() {
+        let theme = super::ColorTheme::default();
+        let mut progress = super::ToolProgress::new("bash");
+        let mut out = Vec::new();
+        progress.tick(&theme, &mut out).expect("tick succeeds");
+        let output = String::from_utf8_lossy(&out);
+        assert!(output.contains("Running bash"));
+    }
+
+    #[test]
+    fn welcome_banner_contains_model_and_cwd() {
+        let banner = super::render_welcome_banner("opus-4.6", "/home/test");
+        assert!(banner.contains("Claw Code"));
+        assert!(banner.contains("opus-4.6"));
+        assert!(banner.contains("/home/test"));
+        assert!(banner.contains("/help"));
+    }
+
+    #[test]
+    fn box_tool_output_wraps_short_output() {
+        let boxed = super::box_tool_output("bash", "hello\nworld", true, 20);
+        let plain = strip_ansi(&boxed);
+        assert!(plain.contains("bash"));
+        assert!(plain.contains("hello"));
+        assert!(plain.contains("world"));
+        assert!(plain.contains("\u{2713}"));
+    }
+
+    #[test]
+    fn box_tool_output_collapses_long_output() {
+        let long_output = (0..30)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let boxed = super::box_tool_output("bash", &long_output, true, 20);
+        let plain = strip_ansi(&boxed);
+        assert!(plain.contains("more lines"));
+        assert!(plain.contains("line 0"));
+        assert!(plain.contains("line 29"));
     }
 }

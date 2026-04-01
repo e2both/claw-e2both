@@ -93,6 +93,29 @@ impl Highlighter for SlashCommandHelper {
 impl Validator for SlashCommandHelper {}
 impl Helper for SlashCommandHelper {}
 
+/// Tracks the visual state of the input prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptState {
+    /// Default prompt: `claw> `
+    Normal,
+    /// After an error: `claw [!]> ` (red)
+    Error,
+    /// After compaction: `claw [~]> ` (yellow)
+    Compact,
+}
+
+impl PromptState {
+    /// Returns the ANSI-colored prompt string for this state.
+    #[must_use]
+    pub fn prompt_string(self) -> String {
+        match self {
+            Self::Normal => "claw> ".to_string(),
+            Self::Error => "\x1b[31mclaw [!]> \x1b[0m".to_string(),
+            Self::Compact => "\x1b[33mclaw [~]> \x1b[0m".to_string(),
+        }
+    }
+}
+
 pub struct LineEditor {
     prompt: String,
     editor: Editor<SlashCommandHelper, DefaultHistory>,
@@ -115,6 +138,10 @@ impl LineEditor {
             prompt: prompt.into(),
             editor,
         }
+    }
+
+    pub fn set_prompt_state(&mut self, state: PromptState) {
+        self.prompt = state.prompt_string();
     }
 
     pub fn push_history(&mut self, entry: impl Into<String>) {
@@ -265,5 +292,30 @@ mod tests {
         editor.push_history("/help");
 
         assert_eq!(editor.editor.history().len(), 1);
+    }
+
+    #[test]
+    fn prompt_state_normal_produces_claw_prompt() {
+        let prompt = super::PromptState::Normal.prompt_string();
+        assert_eq!(prompt, "claw> ");
+    }
+
+    #[test]
+    fn prompt_state_error_contains_exclamation() {
+        let prompt = super::PromptState::Error.prompt_string();
+        assert!(prompt.contains("[!]"));
+    }
+
+    #[test]
+    fn prompt_state_compact_contains_tilde() {
+        let prompt = super::PromptState::Compact.prompt_string();
+        assert!(prompt.contains("[~]"));
+    }
+
+    #[test]
+    fn set_prompt_state_updates_prompt() {
+        let mut editor = LineEditor::new("claw> ", vec![]);
+        editor.set_prompt_state(super::PromptState::Error);
+        assert!(editor.prompt.contains("[!]"));
     }
 }

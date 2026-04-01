@@ -38,7 +38,7 @@ use commands::{
 };
 use compat_harness::{extract_manifest, UpstreamPaths};
 use init::initialize_repo;
-use render::{MarkdownStreamState, Spinner, TerminalRenderer};
+use render::{MarkdownStreamState, Spinner, StatusBar, TerminalRenderer};
 use runtime::{
     clear_oauth_credentials, generate_pkce_pair, generate_state, load_system_prompt,
     parse_oauth_callback_request_target, save_oauth_credentials, ApiClient, ApiRequest,
@@ -936,7 +936,7 @@ fn run_repl(
     permission_mode: PermissionMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut cli = LiveCli::new(model, true, allowed_tools, permission_mode)?;
-    let mut editor = input::LineEditor::new("> ", slash_command_completion_candidates());
+    let mut editor = input::LineEditor::new("claw> ", slash_command_completion_candidates());
     println!("{}", cli.startup_banner());
 
     loop {
@@ -951,13 +951,27 @@ fn run_repl(
                     break;
                 }
                 if let Some(command) = SlashCommand::parse(&trimmed) {
+                    let was_compact = matches!(command, SlashCommand::Compact);
                     if cli.handle_repl_command(command)? {
                         cli.persist_session()?;
+                    }
+                    if was_compact {
+                        editor.set_prompt_state(input::PromptState::Compact);
                     }
                     continue;
                 }
                 editor.push_history(input);
-                cli.run_turn(&trimmed)?;
+                match cli.run_turn(&trimmed) {
+                    Ok(()) => {
+                        editor.set_prompt_state(input::PromptState::Normal);
+                        // Render status bar after each turn
+                        let _ = cli.status_bar.render_to(&mut io::stdout());
+                    }
+                    Err(e) => {
+                        editor.set_prompt_state(input::PromptState::Error);
+                        eprintln!("error: {e}");
+                    }
+                }
             }
             input::ReadOutcome::Cancel => {}
             input::ReadOutcome::Exit => {
@@ -986,6 +1000,7 @@ struct LiveCli {
     session: SessionHandle,
     current_theme: String,
     undo_tracker: SharedUndoTracker,
+    status_bar: StatusBar,
 }
 
 impl LiveCli {
@@ -1008,6 +1023,8 @@ impl LiveCli {
             permission_mode,
             undo_tracker.clone(),
         )?;
+        let mut status_bar = StatusBar::new(&model, u64::from(max_tokens_for_model(&model)));
+        status_bar.set_session_id(&session.id);
         let cli = Self {
             model,
             allowed_tools,
@@ -1017,6 +1034,7 @@ impl LiveCli {
             session,
             current_theme: "default".to_string(),
             undo_tracker,
+            status_bar,
         };
         cli.persist_session()?;
         Ok(cli)
@@ -1051,7 +1069,7 @@ impl LiveCli {
         let mut spinner = Spinner::new();
         let mut stdout = io::stdout();
         spinner.tick(
-            "🦀 Thinking...",
+            "\u{1f980} Thinking...",
             TerminalRenderer::new().color_theme(),
             &mut stdout,
         )?;
@@ -1059,12 +1077,18 @@ impl LiveCli {
         let result = self.runtime.run_turn(input, Some(&mut permission_prompter));
         match result {
             Ok(summary) => {
+                let token_count = summary.usage.output_tokens;
                 spinner.finish(
-                    "✨ Done",
+                    &format!("\u{2728} Done ({token_count} tokens)"),
                     TerminalRenderer::new().color_theme(),
                     &mut stdout,
                 )?;
                 println!();
+                // Update status bar with usage data
+                self.status_bar.update_usage(
+                    u64::from(summary.usage.input_tokens),
+                    u64::from(summary.usage.output_tokens),
+                );
                 if let Some(event) = summary.auto_compaction {
                     println!(
                         "{}",
@@ -1076,7 +1100,7 @@ impl LiveCli {
             }
             Err(error) => {
                 spinner.fail(
-                    "❌ Request failed",
+                    "\u{274c} Request failed",
                     TerminalRenderer::new().color_theme(),
                     &mut stdout,
                 )?;

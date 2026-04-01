@@ -1,5 +1,4 @@
 use std::env;
-use std::fmt::Write as FmtWrite;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -9,6 +8,7 @@ use runtime::{
 };
 
 use crate::git_helpers::parse_git_status_metadata;
+use crate::render::box_tool_output;
 use crate::session_mgr::{list_managed_sessions, sessions_dir};
 use crate::DEFAULT_DATE;
 
@@ -779,32 +779,37 @@ fn first_visible_line(text: &str) -> &str {
 }
 
 fn format_bash_result(icon: &str, parsed: &serde_json::Value) -> String {
-    let mut lines = vec![format!("{icon} \x1b[38;5;245mbash\x1b[0m")];
+    // Check for background tasks first (keep simple format)
     if let Some(task_id) = parsed
         .get("backgroundTaskId")
         .and_then(serde_json::Value::as_str)
     {
-        write!(lines[0], " backgrounded ({task_id})").unwrap();
-    } else if let Some(status) = parsed
-        .get("returnCodeInterpretation")
-        .and_then(serde_json::Value::as_str)
-        .filter(|status| !status.is_empty())
-    {
-        write!(lines[0], " {status}").unwrap();
+        return format!("{icon} \x1b[38;5;245mbash\x1b[0m backgrounded ({task_id})");
     }
 
+    let is_error = parsed
+        .get("returnCodeInterpretation")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|s| !s.is_empty() && s != "success");
+
+    let mut output_parts = Vec::new();
     if let Some(stdout) = parsed.get("stdout").and_then(serde_json::Value::as_str) {
         if !stdout.trim().is_empty() {
-            lines.push(stdout.trim_end().to_string());
+            output_parts.push(stdout.trim_end().to_string());
         }
     }
     if let Some(stderr) = parsed.get("stderr").and_then(serde_json::Value::as_str) {
         if !stderr.trim().is_empty() {
-            lines.push(format!("\x1b[38;5;203m{}\x1b[0m", stderr.trim_end()));
+            output_parts.push(format!("\x1b[38;5;203m{}\x1b[0m", stderr.trim_end()));
         }
     }
 
-    lines.join("\n\n")
+    if output_parts.is_empty() {
+        return format!("{icon} \x1b[38;5;245mbash\x1b[0m");
+    }
+
+    let combined = output_parts.join("\n");
+    box_tool_output("bash", &combined, !is_error, 20)
 }
 
 fn format_read_result(icon: &str, parsed: &serde_json::Value) -> String {
