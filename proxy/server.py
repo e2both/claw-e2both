@@ -154,6 +154,9 @@ async def stream_proxy(
                 yield make_message_start(msg_id, original_model, 0)
 
                 buffer = ""
+                in_think_block = False  # Track <think> blocks
+                think_buffer = ""
+
                 async for raw_chunk in resp.aiter_text():
                     buffer += raw_chunk
                     while "\n" in buffer:
@@ -183,13 +186,44 @@ async def stream_proxy(
 
                         text_content = delta.get("content")
                         if text_content:
-                            if not text_block_started:
-                                yield make_content_block_start(next_block_index, "text")
-                                text_index = next_block_index
-                                next_block_index += 1
-                                text_block_started = True
-                            yield make_text_delta(text_index, text_content)
-                            output_tokens += 1
+                            # Filter out <think>...</think> blocks from Qwen3
+                            think_buffer += text_content
+                            # Process accumulated text to strip think blocks
+                            while think_buffer:
+                                if in_think_block:
+                                    end_idx = think_buffer.find("</think>")
+                                    if end_idx >= 0:
+                                        think_buffer = think_buffer[end_idx + 8:]
+                                        in_think_block = False
+                                    else:
+                                        think_buffer = ""  # Still inside think, discard
+                                        break
+                                else:
+                                    start_idx = think_buffer.find("<think>")
+                                    if start_idx >= 0:
+                                        # Emit text before <think>
+                                        clean = think_buffer[:start_idx]
+                                        if clean:
+                                            if not text_block_started:
+                                                yield make_content_block_start(next_block_index, "text")
+                                                text_index = next_block_index
+                                                next_block_index += 1
+                                                text_block_started = True
+                                            yield make_text_delta(text_index, clean)
+                                            output_tokens += 1
+                                        think_buffer = think_buffer[start_idx + 7:]
+                                        in_think_block = True
+                                    else:
+                                        # No think tag, emit all
+                                        if not text_block_started:
+                                            yield make_content_block_start(next_block_index, "text")
+                                            text_index = next_block_index
+                                            next_block_index += 1
+                                            text_block_started = True
+                                        yield make_text_delta(text_index, think_buffer)
+                                        output_tokens += 1
+                                        think_buffer = ""
+                                        break
 
                         for tc in delta.get("tool_calls") or []:
                             tc_index = tc.get("index", 0)

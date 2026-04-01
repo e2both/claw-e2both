@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from typing import Any
 
 from config import resolve_model
+
+
+def strip_think_blocks(text: str) -> str:
+    """Remove <think>...</think> blocks from model output."""
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -164,10 +170,12 @@ def openai_to_anthropic_response(
 
     content: list[dict[str, Any]] = []
 
-    # Text content
+    # Text content (strip <think>...</think> blocks from reasoning models)
     text = message.get("content")
     if text:
-        content.append({"type": "text", "text": text})
+        text = strip_think_blocks(text)
+        if text.strip():
+            content.append({"type": "text", "text": text})
 
     # Tool calls -> tool_use blocks
     for tc in message.get("tool_calls") or []:
