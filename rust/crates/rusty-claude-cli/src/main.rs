@@ -365,7 +365,8 @@ fn permission_mode_from_label(mode: &str) -> PermissionMode {
 }
 
 fn default_permission_mode() -> PermissionMode {
-    env::var("RUSTY_CLAUDE_PERMISSION_MODE")
+    env::var("CLAW_PERMISSION_MODE")
+        .or_else(|_| env::var("RUSTY_CLAUDE_PERMISSION_MODE"))
         .ok()
         .as_deref()
         .and_then(normalize_permission_mode)
@@ -442,7 +443,7 @@ fn dump_manifests() {
 }
 
 fn print_bootstrap_plan() {
-    for phase in runtime::BootstrapPlan::claude_code_default().phases() {
+    for phase in runtime::BootstrapPlan::claw_code_default().phases() {
         println!("- {phase:?}");
     }
 }
@@ -475,7 +476,7 @@ fn run_login() -> Result<(), Box<dyn std::error::Error>> {
         OAuthAuthorizationRequest::from_config(oauth, redirect_uri.clone(), state.clone(), &pkce)
             .build_url();
 
-    println!("Starting Claude OAuth login...");
+    println!("Starting Claw OAuth login...");
     println!("Listening for callback on {redirect_uri}");
     if let Err(error) = open_browser(&authorize_url) {
         eprintln!("warning: failed to open browser automatically: {error}");
@@ -510,13 +511,13 @@ fn run_login() -> Result<(), Box<dyn std::error::Error>> {
         expires_at: token_set.expires_at,
         scopes: token_set.scopes,
     })?;
-    println!("Claude OAuth login complete.");
+    println!("Claw OAuth login complete.");
     Ok(())
 }
 
 fn run_logout() -> Result<(), Box<dyn std::error::Error>> {
     clear_oauth_credentials()?;
-    println!("Claude OAuth credentials cleared.");
+    println!("Claw OAuth credentials cleared.");
     Ok(())
 }
 
@@ -561,9 +562,9 @@ fn wait_for_oauth_callback(
     let callback = parse_oauth_callback_request_target(target)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     let body = if callback.error.is_some() {
-        "Claude OAuth login failed. You can close this window."
+        "Claw OAuth login failed. You can close this window."
     } else {
-        "Claude OAuth login succeeded. You can close this window."
+        "Claw OAuth login succeeded. You can close this window."
     };
     let response = format!(
         "HTTP/1.1 200 OK\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
@@ -895,7 +896,7 @@ fn run_resume_command(
         }),
         SlashCommand::Init => Ok(ResumeCommandOutcome {
             session: session.clone(),
-            message: Some(init_claude_md()?),
+            message: Some(init_claw_md()?),
         }),
         SlashCommand::Diff => Ok(ResumeCommandOutcome {
             session: session.clone(),
@@ -1655,9 +1656,16 @@ impl LiveCli {
 
 fn sessions_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
-    let path = cwd.join(".claude").join("sessions");
-    fs::create_dir_all(&path)?;
-    Ok(path)
+    let claw_path = cwd.join(".claw").join("sessions");
+    if claw_path.is_dir() {
+        return Ok(claw_path);
+    }
+    let claude_path = cwd.join(".claude").join("sessions");
+    if claude_path.is_dir() {
+        return Ok(claude_path);
+    }
+    fs::create_dir_all(&claw_path)?;
+    Ok(claw_path)
 }
 
 fn create_managed_session_handle() -> Result<SessionHandle, Box<dyn std::error::Error>> {
@@ -1938,7 +1946,7 @@ fn render_memory_report() -> Result<String, Box<dyn std::error::Error>> {
     if project_context.instruction_files.is_empty() {
         lines.push("Discovered files".to_string());
         lines.push(
-            "  No CLAUDE instruction files discovered in the current directory ancestry."
+            "  No CLAW instruction files discovered in the current directory ancestry."
                 .to_string(),
         );
     } else {
@@ -1964,13 +1972,13 @@ fn render_memory_report() -> Result<String, Box<dyn std::error::Error>> {
     ))
 }
 
-fn init_claude_md() -> Result<String, Box<dyn std::error::Error>> {
+fn init_claw_md() -> Result<String, Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
     Ok(initialize_repo(&cwd)?.render())
 }
 
 fn run_init() -> Result<(), Box<dyn std::error::Error>> {
-    println!("{}", init_claude_md()?);
+    println!("{}", init_claw_md()?);
     Ok(())
 }
 
@@ -3723,8 +3731,8 @@ mod tests {
 
     #[test]
     fn init_template_mentions_detected_rust_workspace() {
-        let rendered = crate::init::render_init_claude_md(std::path::Path::new("."));
-        assert!(rendered.contains("# CLAUDE.md"));
+        let rendered = crate::init::render_init_claw_md(std::path::Path::new("."));
+        assert!(rendered.contains("# CLAW.md"));
         assert!(rendered.contains("cargo clippy --workspace --all-targets -- -D warnings"));
     }
 
