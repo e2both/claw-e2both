@@ -21,6 +21,18 @@ pub struct Cli {
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub output_format: OutputFormat,
 
+    /// Run as a headless subagent: read prompt from stdin, write result to stdout
+    #[arg(long, hide = true)]
+    pub subagent: bool,
+
+    /// Model override for subagent mode
+    #[arg(long, requires = "subagent")]
+    pub subagent_model: Option<String>,
+
+    /// Maximum duration in milliseconds for subagent execution
+    #[arg(long, requires = "subagent")]
+    pub max_duration_ms: Option<u64>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }

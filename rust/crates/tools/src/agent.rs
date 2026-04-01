@@ -1,4 +1,5 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::{Arc, Mutex};
 
 use api::{
     read_base_url, AnthropicClient, ContentBlockDelta, InputContentBlock, InputMessage,
@@ -64,7 +65,10 @@ pub(crate) fn execute_agent(input: AgentInput) -> Result<AgentOutput, String> {
     execute_agent_with_spawn(input, spawn_agent_job)
 }
 
-pub(crate) fn execute_agent_with_spawn<F>(input: AgentInput, spawn_fn: F) -> Result<AgentOutput, String>
+pub(crate) fn execute_agent_with_spawn<F>(
+    input: AgentInput,
+    spawn_fn: F,
+) -> Result<AgentOutput, String>
 where
     F: FnOnce(AgentJob) -> Result<(), String>,
 {
@@ -142,6 +146,14 @@ where
 }
 
 fn spawn_agent_job(job: AgentJob) -> Result<(), String> {
+    // Try process-based spawning first, fall back to thread-based
+    if spawn_process_agent(&job).is_ok() {
+        return Ok(());
+    }
+    spawn_thread_agent(job)
+}
+
+fn spawn_thread_agent(job: AgentJob) -> Result<(), String> {
     let thread_name = format!("clawd-agent-{}", job.manifest.agent_id);
     std::thread::Builder::new()
         .name(thread_name)
@@ -166,6 +178,94 @@ fn spawn_agent_job(job: AgentJob) -> Result<(), String> {
         })
         .map(|_| ())
         .map_err(|error| error.to_string())
+}
+
+/// JSON result from the subagent process stdout.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SubagentResult {
+    pub status: String,
+    pub output: String,
+    pub usage: SubagentUsage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SubagentUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+/// Build the command-line arguments for spawning a subagent process.
+pub(crate) fn build_subagent_command(
+    exe: &std::path::Path,
+    model: &str,
+    max_duration_ms: Option<u64>,
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--subagent");
+    cmd.arg("--subagent-model").arg(model);
+    if let Some(ms) = max_duration_ms {
+        cmd.arg("--max-duration-ms").arg(ms.to_string());
+    }
+    cmd.stdin(std::process::Stdio::piped());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::null());
+    cmd
+}
+
+fn spawn_process_agent(job: &AgentJob) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let model = job.manifest.model.as_deref().unwrap_or(DEFAULT_AGENT_MODEL);
+    let mut cmd = build_subagent_command(&exe, model, None);
+    let prompt = job.prompt.clone();
+    let manifest = job.manifest.clone();
+
+    let thread_name = format!("clawd-process-agent-{}", manifest.agent_id);
+    std::thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || {
+            let result = (|| -> Result<(), String> {
+                let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+                if let Some(ref mut stdin) = child.stdin.take() {
+                    use std::io::Write as _;
+                    stdin
+                        .write_all(prompt.as_bytes())
+                        .map_err(|e| e.to_string())?;
+                }
+                let output = child.wait_with_output().map_err(|e| e.to_string())?;
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if let Ok(result) = serde_json::from_str::<SubagentResult>(&stdout) {
+                    match result.status.as_str() {
+                        "ok" => persist_agent_terminal_state(
+                            &manifest,
+                            "completed",
+                            Some(&result.output),
+                            None,
+                        ),
+                        _ => persist_agent_terminal_state(
+                            &manifest,
+                            "failed",
+                            None,
+                            Some(result.output),
+                        ),
+                    }
+                } else {
+                    persist_agent_terminal_state(
+                        &manifest,
+                        "failed",
+                        None,
+                        Some(format!(
+                            "subagent process exited with code {:?}",
+                            output.status.code()
+                        )),
+                    )
+                }
+            })();
+            if let Err(error) = result {
+                let _ = persist_agent_terminal_state(&manifest, "failed", None, Some(error));
+            }
+        })
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 fn run_agent_job(job: &AgentJob) -> Result<(), String> {
@@ -683,6 +783,116 @@ fn iso8601_now() -> String {
         .unwrap_or_default()
         .as_secs()
         .to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Agent Tracker
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) enum AgentState {
+    Running,
+    Completed,
+    Failed(String),
+    TimedOut,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct AgentStatus {
+    pub id: String,
+    pub model: String,
+    pub prompt_preview: String,
+    pub started_at: std::time::Instant,
+    pub pid: Option<u32>,
+    pub state: AgentState,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct AgentTracker {
+    agents: Arc<Mutex<HashMap<String, AgentStatus>>>,
+}
+
+#[allow(dead_code)]
+impl AgentTracker {
+    pub(crate) fn new() -> Self {
+        Self {
+            agents: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub(crate) fn track(
+        &self,
+        id: String,
+        model: String,
+        prompt_preview: String,
+        pid: Option<u32>,
+    ) {
+        let status = AgentStatus {
+            id: id.clone(),
+            model,
+            prompt_preview,
+            started_at: std::time::Instant::now(),
+            pid,
+            state: AgentState::Running,
+        };
+        self.agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id, status);
+    }
+
+    pub(crate) fn complete(&self, id: &str) {
+        if let Some(status) = self
+            .agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(id)
+        {
+            status.state = AgentState::Completed;
+        }
+    }
+
+    pub(crate) fn fail(&self, id: &str, reason: String) {
+        if let Some(status) = self
+            .agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(id)
+        {
+            status.state = AgentState::Failed(reason);
+        }
+    }
+
+    pub(crate) fn list(&self) -> Vec<AgentStatus> {
+        self.agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn cancel(&self, id: &str) -> Result<(), String> {
+        let agents = self
+            .agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let status = agents
+            .get(id)
+            .ok_or_else(|| format!("agent {id} not found"))?;
+        if let Some(pid) = status.pid {
+            // Use the kill command to send SIGTERM
+            let _ = std::process::Command::new("kill")
+                .arg(pid.to_string())
+                .status();
+            Ok(())
+        } else {
+            Err(format!("agent {id} has no pid (thread-based)"))
+        }
+    }
 }
 
 fn canonical_tool_token(value: &str) -> String {

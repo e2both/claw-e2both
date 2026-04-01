@@ -1256,6 +1256,117 @@ printf 'pwsh:%s' "$1"
         assert!(err.contains("PowerShell executable not found"));
     }
 
+    #[test]
+    fn agent_tracker_basic_operations() {
+        use crate::agent::{AgentState, AgentTracker};
+
+        let tracker = AgentTracker::new();
+
+        // Track two agents
+        tracker.track(
+            "agent-1".to_string(),
+            "claude-opus-4-6".to_string(),
+            "Inspect the codebase".to_string(),
+            Some(12345),
+        );
+        tracker.track(
+            "agent-2".to_string(),
+            "claude-sonnet-4-6".to_string(),
+            "Run tests".to_string(),
+            None,
+        );
+
+        let agents = tracker.list();
+        assert_eq!(agents.len(), 2);
+
+        // Complete one
+        tracker.complete("agent-1");
+        let agents = tracker.list();
+        let a1 = agents.iter().find(|a| a.id == "agent-1").unwrap();
+        assert!(matches!(a1.state, AgentState::Completed));
+
+        // Fail the other
+        tracker.fail("agent-2", "out of tokens".to_string());
+        let agents = tracker.list();
+        let a2 = agents.iter().find(|a| a.id == "agent-2").unwrap();
+        assert!(matches!(a2.state, AgentState::Failed(ref msg) if msg == "out of tokens"));
+
+        // Cancel on non-existent agent
+        let cancel_result = tracker.cancel("agent-99");
+        assert!(cancel_result.is_err());
+        assert!(cancel_result.unwrap_err().contains("not found"));
+
+        // Cancel on thread-based agent (no pid)
+        let cancel_no_pid = tracker.cancel("agent-2");
+        assert!(cancel_no_pid.is_err());
+        assert!(cancel_no_pid.unwrap_err().contains("no pid"));
+    }
+
+    #[test]
+    fn subagent_command_construction() {
+        use crate::agent::build_subagent_command;
+
+        let exe = PathBuf::from("/usr/local/bin/claw");
+        let cmd = build_subagent_command(&exe, "claude-opus-4-6", Some(30000));
+        let program = cmd.get_program();
+        assert_eq!(program, "/usr/local/bin/claw");
+
+        let args: Vec<_> = cmd.get_args().collect();
+        assert!(args.contains(&std::ffi::OsStr::new("--subagent")));
+        assert!(args.contains(&std::ffi::OsStr::new("--subagent-model")));
+        assert!(args.contains(&std::ffi::OsStr::new("claude-opus-4-6")));
+        assert!(args.contains(&std::ffi::OsStr::new("--max-duration-ms")));
+        assert!(args.contains(&std::ffi::OsStr::new("30000")));
+    }
+
+    #[test]
+    fn subagent_command_without_timeout() {
+        use crate::agent::build_subagent_command;
+
+        let exe = PathBuf::from("/usr/local/bin/claw");
+        let cmd = build_subagent_command(&exe, "claude-sonnet-4-6", None);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert!(args.contains(&std::ffi::OsStr::new("--subagent")));
+        assert!(!args.contains(&std::ffi::OsStr::new("--max-duration-ms")));
+    }
+
+    #[test]
+    fn subagent_json_output_format() {
+        use crate::agent::{SubagentResult, SubagentUsage};
+
+        let result = SubagentResult {
+            status: "ok".to_string(),
+            output: "Task completed successfully".to_string(),
+            usage: SubagentUsage {
+                input_tokens: 1500,
+                output_tokens: 300,
+            },
+        };
+        let json_str = serde_json::to_string(&result).expect("should serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).expect("should parse");
+        assert_eq!(parsed["status"], "ok");
+        assert_eq!(parsed["output"], "Task completed successfully");
+        assert_eq!(parsed["usage"]["input_tokens"], 1500);
+        assert_eq!(parsed["usage"]["output_tokens"], 300);
+
+        // Round-trip deserialization
+        let deserialized: SubagentResult =
+            serde_json::from_str(&json_str).expect("should deserialize");
+        assert_eq!(deserialized.status, "ok");
+        assert_eq!(deserialized.usage.input_tokens, 1500);
+
+        // Error and timeout variants
+        let error_json = r#"{"status":"error","output":"api key missing","usage":{"input_tokens":0,"output_tokens":0}}"#;
+        let error: SubagentResult =
+            serde_json::from_str(error_json).expect("should parse error result");
+        assert_eq!(error.status, "error");
+
+        let timeout_json = r#"{"status":"timeout","output":"subagent exceeded 30000ms timeout","usage":{"input_tokens":0,"output_tokens":0}}"#;
+        let timeout: SubagentResult =
+            serde_json::from_str(timeout_json).expect("should parse timeout result");
+        assert_eq!(timeout.status, "timeout");
+    }
+
     struct TestServer {
         addr: SocketAddr,
         shutdown: Option<std::sync::mpsc::Sender<()>>,

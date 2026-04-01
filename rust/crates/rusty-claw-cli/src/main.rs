@@ -99,6 +99,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         CliAction::Login => run_login()?,
         CliAction::Logout => run_logout()?,
         CliAction::Init => run_init()?,
+        CliAction::Subagent {
+            model,
+            max_duration_ms,
+        } => run_subagent(&model, max_duration_ms)?,
         CliAction::Repl {
             model,
             allowed_tools,
@@ -137,6 +141,10 @@ enum CliAction {
         allowed_tools: Option<AllowedToolSet>,
         permission_mode: PermissionMode,
     },
+    Subagent {
+        model: String,
+        max_duration_ms: Option<u64>,
+    },
     // prompt-mode formatting is only supported for non-interactive runs
     Help,
 }
@@ -165,6 +173,9 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
     let mut output_format = CliOutputFormat::Text;
     let mut permission_mode = default_permission_mode();
     let mut wants_version = false;
+    let mut wants_subagent = false;
+    let mut subagent_model: Option<String> = None;
+    let mut max_duration_ms: Option<u64> = None;
     let mut allowed_tool_values = Vec::new();
     let mut rest = Vec::new();
     let mut index = 0;
@@ -246,11 +257,56 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 allowed_tool_values.push(flag[16..].to_string());
                 index += 1;
             }
+            "--subagent" => {
+                wants_subagent = true;
+                index += 1;
+            }
+            "--subagent-model" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| "missing value for --subagent-model".to_string())?;
+                subagent_model = Some(value.clone());
+                index += 2;
+            }
+            flag if flag.starts_with("--subagent-model=") => {
+                subagent_model = Some(flag[17..].to_string());
+                index += 1;
+            }
+            "--max-duration-ms" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| "missing value for --max-duration-ms".to_string())?;
+                max_duration_ms = Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| format!("invalid value for --max-duration-ms: {value}"))?,
+                );
+                index += 2;
+            }
+            flag if flag.starts_with("--max-duration-ms=") => {
+                let value = &flag[18..];
+                max_duration_ms = Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| format!("invalid value for --max-duration-ms: {value}"))?,
+                );
+                index += 1;
+            }
             other => {
                 rest.push(other.to_string());
                 index += 1;
             }
         }
+    }
+
+    if wants_subagent {
+        let effective_model = subagent_model
+            .map(|m| resolve_model_alias(&m).to_string())
+            .unwrap_or_else(|| model.clone());
+        return Ok(CliAction::Subagent {
+            model: effective_model,
+            max_duration_ms,
+        });
     }
 
     if wants_version {
@@ -537,6 +593,90 @@ fn run_logout() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn run_subagent(
+    model: &str,
+    max_duration_ms: Option<u64>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut prompt = String::new();
+    io::stdin().read_to_string(&mut prompt)?;
+    if prompt.trim().is_empty() {
+        let result = json!({
+            "status": "error",
+            "output": "empty prompt on stdin",
+            "usage": { "input_tokens": 0, "output_tokens": 0 }
+        });
+        println!("{}", serde_json::to_string(&result)?);
+        std::process::exit(1);
+    }
+
+    let run_subagent_inner = |model: String, prompt: String| -> Result<serde_json::Value, String> {
+        let system_prompt = build_system_prompt().map_err(|e| e.to_string())?;
+        let mut runtime = build_runtime(
+            Session::new(),
+            model,
+            system_prompt,
+            true,
+            false,
+            None,
+            PermissionMode::DangerFullAccess,
+        )
+        .map_err(|e| e.to_string())?;
+        let summary = runtime.run_turn(prompt, None).map_err(|e| e.to_string())?;
+        let text = final_assistant_text(&summary);
+        let usage = json!({
+            "input_tokens": summary.usage.input_tokens,
+            "output_tokens": summary.usage.output_tokens
+        });
+        Ok(json!({
+            "status": "ok",
+            "output": text,
+            "usage": usage
+        }))
+    };
+
+    let model_owned = model.to_string();
+    let result: Result<serde_json::Value, String> = if let Some(ms) = max_duration_ms {
+        let prompt_for_thread = prompt.clone();
+        let handle = std::thread::spawn(move || run_subagent_inner(model_owned, prompt_for_thread));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+        loop {
+            if handle.is_finished() {
+                break handle
+                    .join()
+                    .map_err(|_| String::from("subagent thread panicked"))?;
+            }
+            if std::time::Instant::now() >= deadline {
+                let result = json!({
+                    "status": "timeout",
+                    "output": format!("subagent exceeded {ms}ms timeout"),
+                    "usage": { "input_tokens": 0, "output_tokens": 0 }
+                });
+                println!("{}", serde_json::to_string(&result).unwrap_or_default());
+                std::process::exit(124);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    } else {
+        run_subagent_inner(model_owned, prompt)
+    };
+
+    match result {
+        Ok(value) => {
+            println!("{}", serde_json::to_string(&value)?);
+            Ok(())
+        }
+        Err(error) => {
+            let result = json!({
+                "status": "error",
+                "output": error.to_string(),
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            });
+            println!("{}", serde_json::to_string(&result)?);
+            std::process::exit(1);
+        }
+    }
+}
+
 fn open_browser(url: &str) -> io::Result<()> {
     let commands = if cfg!(target_os = "macos") {
         vec![("open", vec![url])]
@@ -813,6 +953,13 @@ fn run_repl(
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+struct UndoEntry {
+    path: PathBuf,
+    original_content: Option<String>,
+    operation: String,
+}
+
 struct LiveCli {
     model: String,
     allowed_tools: Option<AllowedToolSet>,
@@ -820,6 +967,8 @@ struct LiveCli {
     system_prompt: Vec<String>,
     runtime: ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>,
     session: SessionHandle,
+    current_theme: String,
+    last_undo: Option<UndoEntry>,
 }
 
 impl LiveCli {
@@ -847,6 +996,8 @@ impl LiveCli {
             system_prompt,
             runtime,
             session,
+            current_theme: "default".to_string(),
+            last_undo: None,
         };
         cli.persist_session()?;
         Ok(cli)
@@ -1043,6 +1194,30 @@ impl LiveCli {
             }
             SlashCommand::Session { action, target } => {
                 self.handle_session_command(action.as_deref(), target.as_deref())?
+            }
+            SlashCommand::Doctor => {
+                self.run_doctor();
+                false
+            }
+            SlashCommand::Mcp => {
+                Self::run_mcp()?;
+                false
+            }
+            SlashCommand::Review => {
+                self.run_review()?;
+                true
+            }
+            SlashCommand::Project => {
+                self.run_project()?;
+                false
+            }
+            SlashCommand::Theme { name } => {
+                self.run_theme(name.as_deref())?;
+                false
+            }
+            SlashCommand::Undo => {
+                self.run_undo()?;
+                false
             }
             SlashCommand::Unknown(name) => {
                 eprintln!("unknown slash command: /{name}");
