@@ -53,15 +53,25 @@ def main():
 
         # Agent loop
         for iteration in range(MAX_ITERATIONS):
+            # First iteration: force tool use. After tool results: let model respond freely.
             try:
-                response = client.chat.completions.create(
-                    model=MODEL,
-                    messages=messages,
-                    tools=TOOL_DEFINITIONS,
-                    tool_choice="auto",
-                    stream=True,
-                    max_tokens=MAX_TOKENS,
-                )
+                if iteration == 0:
+                    response = client.chat.completions.create(
+                        model=MODEL,
+                        messages=messages,
+                        tools=TOOL_DEFINITIONS,
+                        tool_choice="required",
+                        stream=True,
+                        max_tokens=MAX_TOKENS,
+                    )
+                else:
+                    # After tool results, let model respond without tools to avoid serialization issues
+                    response = client.chat.completions.create(
+                        model=MODEL,
+                        messages=messages,
+                        stream=True,
+                        max_tokens=MAX_TOKENS,
+                    )
             except Exception as e:
                 print_error(f"API error: {e}")
                 break
@@ -126,28 +136,16 @@ def main():
             for idx in sorted(current_tool_calls.keys()):
                 tool_calls.append(current_tool_calls[idx])
 
-            # Build assistant message
-            assistant_msg = {"role": "assistant", "content": assistant_content or None}
-            if tool_calls:
-                assistant_msg["tool_calls"] = [
-                    {
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": {
-                            "name": tc["name"],
-                            "arguments": tc["arguments"],
-                        },
-                    }
-                    for tc in tool_calls
-                ]
-            messages.append(assistant_msg)
-
-            # No tool calls = done
-            if not tool_calls:
+            # No tool calls = done (just text response)
+            if not current_tool_calls:
+                if assistant_content:
+                    messages.append({"role": "assistant", "content": assistant_content})
                 break
 
-            # Execute tools
-            for tc in tool_calls:
+            # Build tool_calls list and execute
+            tool_results_text = []
+            for idx in sorted(current_tool_calls.keys()):
+                tc = current_tool_calls[idx]
                 name = tc["name"]
                 args = tc["arguments"]
                 print_tool_call(name, args)
@@ -158,12 +156,13 @@ def main():
 
                 success = not result.startswith("Error:")
                 print_tool_result(name, result, success, elapsed)
+                tool_results_text.append(f"[Tool: {name}]\n{result}")
 
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc["id"],
-                    "content": result,
-                })
+            # Instead of using tool_calls message format (which vLLM struggles with),
+            # flatten tool calls + results into regular messages
+            tool_summary = "\n\n".join(tool_results_text)
+            messages.append({"role": "assistant", "content": f"I called {len(current_tool_calls)} tool(s)."})
+            messages.append({"role": "user", "content": f"Tool results:\n{tool_summary}\n\nPlease summarize the results concisely in the user's language."})
 
         # Auto-compact
         tokens = estimate_tokens(messages)
