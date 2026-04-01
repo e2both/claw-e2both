@@ -6,6 +6,14 @@ use std::path::{Path, PathBuf};
 use crate::json::JsonValue;
 use crate::sandbox::{FilesystemIsolationMode, SandboxConfig};
 
+/// Resolve an environment variable, trying the new Claw name first, then the legacy Claude name.
+#[must_use]
+pub fn resolve_env_with_fallback(new_name: &str, legacy_name: &str) -> Option<String> {
+    std::env::var(new_name)
+        .ok()
+        .or_else(|| std::env::var(legacy_name).ok())
+}
+
 pub const CLAUDE_CODE_SETTINGS_SCHEMA_NAME: &str = "SettingsSchema";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -46,9 +54,43 @@ pub struct RuntimeFeatureConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HookEntry {
+    pub command: String,
+    pub only_tool_names: Option<Vec<String>>,
+    pub exclude_tool_names: Option<Vec<String>>,
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookEntryConfig {
+    Simple(String),
+    Rich(HookEntry),
+}
+
+impl HookEntryConfig {
+    #[must_use]
+    pub fn into_entry(self) -> HookEntry {
+        match self {
+            Self::Simple(cmd) => HookEntry {
+                command: cmd,
+                ..HookEntry::default()
+            },
+            Self::Rich(entry) => entry,
+        }
+    }
+}
+
+impl From<String> for HookEntryConfig {
+    fn from(s: String) -> Self {
+        Self::Simple(s)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RuntimeHookConfig {
-    pre_tool_use: Vec<String>,
-    post_tool_use: Vec<String>,
+    pre_tool_use: Vec<HookEntryConfig>,
+    post_tool_use: Vec<HookEntryConfig>,
+    notification: Vec<HookEntryConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -174,10 +216,19 @@ impl ConfigLoader {
     #[must_use]
     pub fn default_for(cwd: impl Into<PathBuf>) -> Self {
         let cwd = cwd.into();
-        let config_home = std::env::var_os("CLAUDE_CONFIG_HOME")
+        let config_home = resolve_env_with_fallback("CLAW_CONFIG_HOME", "CLAUDE_CONFIG_HOME")
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")))
-            .unwrap_or_else(|| PathBuf::from(".claude"));
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| {
+                    let claw_path = PathBuf::from(&home).join(".claw");
+                    if claw_path.exists() {
+                        claw_path
+                    } else {
+                        PathBuf::from(home).join(".claude")
+                    }
+                })
+            })
+            .unwrap_or_else(|| PathBuf::from(".claw"));
         Self { cwd, config_home }
     }
 
@@ -187,10 +238,14 @@ impl ConfigLoader {
             || PathBuf::from(".claude.json"),
             |parent| parent.join(".claude.json"),
         );
+        let user_claw_path = self.config_home.parent().map_or_else(
+            || PathBuf::from(".claw.json"),
+            |parent| parent.join(".claw.json"),
+        );
         vec![
             ConfigEntry {
                 source: ConfigSource::User,
-                path: user_legacy_path,
+                path: prefer_existing(&user_claw_path, &user_legacy_path),
             },
             ConfigEntry {
                 source: ConfigSource::User,
@@ -198,15 +253,21 @@ impl ConfigLoader {
             },
             ConfigEntry {
                 source: ConfigSource::Project,
-                path: self.cwd.join(".claude.json"),
+                path: prefer_existing(&self.cwd.join(".claw.json"), &self.cwd.join(".claude.json")),
             },
             ConfigEntry {
                 source: ConfigSource::Project,
-                path: self.cwd.join(".claude").join("settings.json"),
+                path: prefer_existing(
+                    &self.cwd.join(".claw").join("settings.json"),
+                    &self.cwd.join(".claude").join("settings.json"),
+                ),
             },
             ConfigEntry {
                 source: ConfigSource::Local,
-                path: self.cwd.join(".claude").join("settings.local.json"),
+                path: prefer_existing(
+                    &self.cwd.join(".claw").join("settings.local.json"),
+                    &self.cwd.join(".claude").join("settings.local.json"),
+                ),
             },
         ]
     }
@@ -354,19 +415,44 @@ impl RuntimeHookConfig {
     #[must_use]
     pub fn new(pre_tool_use: Vec<String>, post_tool_use: Vec<String>) -> Self {
         Self {
-            pre_tool_use,
-            post_tool_use,
+            pre_tool_use: pre_tool_use
+                .into_iter()
+                .map(HookEntryConfig::from)
+                .collect(),
+            post_tool_use: post_tool_use
+                .into_iter()
+                .map(HookEntryConfig::from)
+                .collect(),
+            notification: Vec::new(),
         }
     }
 
     #[must_use]
-    pub fn pre_tool_use(&self) -> &[String] {
+    pub fn new_rich(
+        pre_tool_use: Vec<HookEntryConfig>,
+        post_tool_use: Vec<HookEntryConfig>,
+        notification: Vec<HookEntryConfig>,
+    ) -> Self {
+        Self {
+            pre_tool_use,
+            post_tool_use,
+            notification,
+        }
+    }
+
+    #[must_use]
+    pub fn pre_tool_use(&self) -> &[HookEntryConfig] {
         &self.pre_tool_use
     }
 
     #[must_use]
-    pub fn post_tool_use(&self) -> &[String] {
+    pub fn post_tool_use(&self) -> &[HookEntryConfig] {
         &self.post_tool_use
+    }
+
+    #[must_use]
+    pub fn notification(&self) -> &[HookEntryConfig] {
+        &self.notification
     }
 }
 
@@ -403,10 +489,19 @@ impl McpServerConfig {
     }
 }
 
+fn prefer_existing(preferred: &Path, fallback: &Path) -> PathBuf {
+    if preferred.exists() {
+        preferred.to_path_buf()
+    } else {
+        fallback.to_path_buf()
+    }
+}
+
 fn read_optional_json_object(
     path: &Path,
 ) -> Result<Option<BTreeMap<String, JsonValue>>, ConfigError> {
-    let is_legacy_config = path.file_name().and_then(|name| name.to_str()) == Some(".claude.json");
+    let file_name = path.file_name().and_then(|name| name.to_str());
+    let is_legacy_config = file_name == Some(".claude.json") || file_name == Some(".claw.json");
     let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -419,7 +514,7 @@ fn read_optional_json_object(
 
     let parsed = match JsonValue::parse(&contents) {
         Ok(parsed) => parsed,
-        Err(error) if is_legacy_config => return Ok(None),
+        Err(_error) if is_legacy_config => return Ok(None),
         Err(error) => return Err(ConfigError::Parse(format!("{}: {error}", path.display()))),
     };
     let Some(object) = parsed.as_object() else {
@@ -468,6 +563,80 @@ fn parse_optional_model(root: &JsonValue) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn parse_hook_entry_array(
+    hooks: &BTreeMap<String, JsonValue>,
+    key: &str,
+    context: &str,
+) -> Result<Vec<HookEntryConfig>, ConfigError> {
+    let Some(value) = hooks.get(key) else {
+        return Ok(Vec::new());
+    };
+    let Some(array) = value.as_array() else {
+        return Err(ConfigError::Parse(format!(
+            "{context}: field {key} must be an array"
+        )));
+    };
+    array
+        .iter()
+        .map(|item| match item {
+            JsonValue::String(s) => Ok(HookEntryConfig::Simple(s.clone())),
+            JsonValue::Object(obj) => {
+                let command = obj
+                    .get("command")
+                    .and_then(JsonValue::as_str)
+                    .ok_or_else(|| {
+                        ConfigError::Parse(format!(
+                            "{context}: hook entry object must have a \"command\" string field"
+                        ))
+                    })?
+                    .to_owned();
+                let only_tool_names = obj
+                    .get("only_tool_names")
+                    .map(|v| json_value_to_string_vec(v, &format!("{context}.only_tool_names")))
+                    .transpose()?;
+                let exclude_tool_names = obj
+                    .get("exclude_tool_names")
+                    .map(|v| json_value_to_string_vec(v, &format!("{context}.exclude_tool_names")))
+                    .transpose()?;
+                let timeout_ms = obj
+                    .get("timeout_ms")
+                    .map(|v| match v {
+                        JsonValue::Number(n) => Ok((*n).cast_unsigned()),
+                        _ => Err(ConfigError::Parse(format!(
+                            "{context}: timeout_ms must be a number"
+                        ))),
+                    })
+                    .transpose()?;
+                Ok(HookEntryConfig::Rich(HookEntry {
+                    command,
+                    only_tool_names,
+                    exclude_tool_names,
+                    timeout_ms,
+                }))
+            }
+            _ => Err(ConfigError::Parse(format!(
+                "{context}: field {key} entries must be strings or objects"
+            ))),
+        })
+        .collect()
+}
+
+fn json_value_to_string_vec(value: &JsonValue, context: &str) -> Result<Vec<String>, ConfigError> {
+    let Some(array) = value.as_array() else {
+        return Err(ConfigError::Parse(format!(
+            "{context}: must be an array of strings"
+        )));
+    };
+    array
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| ConfigError::Parse(format!("{context}: must contain only strings")))
+        })
+        .collect()
+}
+
 fn parse_optional_hooks_config(root: &JsonValue) -> Result<RuntimeHookConfig, ConfigError> {
     let Some(object) = root.as_object() else {
         return Ok(RuntimeHookConfig::default());
@@ -477,10 +646,9 @@ fn parse_optional_hooks_config(root: &JsonValue) -> Result<RuntimeHookConfig, Co
     };
     let hooks = expect_object(hooks_value, "merged settings.hooks")?;
     Ok(RuntimeHookConfig {
-        pre_tool_use: optional_string_array(hooks, "PreToolUse", "merged settings.hooks")?
-            .unwrap_or_default(),
-        post_tool_use: optional_string_array(hooks, "PostToolUse", "merged settings.hooks")?
-            .unwrap_or_default(),
+        pre_tool_use: parse_hook_entry_array(hooks, "PreToolUse", "merged settings.hooks")?,
+        post_tool_use: parse_hook_entry_array(hooks, "PostToolUse", "merged settings.hooks")?,
+        notification: parse_hook_entry_array(hooks, "Notification", "merged settings.hooks")?,
     })
 }
 
@@ -793,8 +961,8 @@ fn deep_merge_objects(
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfigLoader, ConfigSource, McpServerConfig, McpTransport, ResolvedPermissionMode,
-        CLAUDE_CODE_SETTINGS_SCHEMA_NAME,
+        ConfigLoader, ConfigSource, HookEntryConfig, McpServerConfig, McpTransport,
+        ResolvedPermissionMode, CLAUDE_CODE_SETTINGS_SCHEMA_NAME,
     };
     use crate::json::JsonValue;
     use crate::sandbox::FilesystemIsolationMode;
@@ -896,8 +1064,14 @@ mod tests {
             .and_then(JsonValue::as_object)
             .expect("hooks object")
             .contains_key("PostToolUse"));
-        assert_eq!(loaded.hooks().pre_tool_use(), &["base".to_string()]);
-        assert_eq!(loaded.hooks().post_tool_use(), &["project".to_string()]);
+        assert_eq!(
+            loaded.hooks().pre_tool_use(),
+            &[HookEntryConfig::Simple("base".to_string())]
+        );
+        assert_eq!(
+            loaded.hooks().post_tool_use(),
+            &[HookEntryConfig::Simple("project".to_string())]
+        );
         assert!(loaded.mcp().get("home").is_some());
         assert!(loaded.mcp().get("project").is_some());
 

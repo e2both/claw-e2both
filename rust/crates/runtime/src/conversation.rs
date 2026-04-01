@@ -11,7 +11,8 @@ use crate::session::{ContentBlock, ConversationMessage, Session};
 use crate::usage::{TokenUsage, UsageTracker};
 
 const DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD: u32 = 200_000;
-const AUTO_COMPACTION_THRESHOLD_ENV_VAR: &str = "CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS";
+const AUTO_COMPACTION_THRESHOLD_NEW_ENV_VAR: &str = "CLAW_CODE_AUTO_COMPACT_INPUT_TOKENS";
+const AUTO_COMPACTION_THRESHOLD_LEGACY_ENV_VAR: &str = "CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiRequest {
@@ -133,6 +134,7 @@ where
     }
 
     #[must_use]
+    #[allow(clippy::needless_pass_by_value)]
     pub fn new_with_features(
         session: Session,
         api_client: C,
@@ -271,6 +273,9 @@ where
             }
         }
 
+        // Fire notification hooks at end of turn.
+        let _notification_result = self.hook_runner.run_notification();
+
         let auto_compaction = self.maybe_auto_compact();
 
         Ok(TurnSummary {
@@ -336,9 +341,11 @@ where
 #[must_use]
 pub fn auto_compaction_threshold_from_env() -> u32 {
     parse_auto_compaction_threshold(
-        std::env::var(AUTO_COMPACTION_THRESHOLD_ENV_VAR)
-            .ok()
-            .as_deref(),
+        crate::config::resolve_env_with_fallback(
+            AUTO_COMPACTION_THRESHOLD_NEW_ENV_VAR,
+            AUTO_COMPACTION_THRESHOLD_LEGACY_ENV_VAR,
+        )
+        .as_deref(),
     )
 }
 
@@ -761,7 +768,7 @@ mod tests {
             "post hook should preserve non-error result: {output:?}"
         );
         assert!(
-            output.contains("4"),
+            output.contains('4'),
             "tool output missing value: {output:?}"
         );
         assert!(
