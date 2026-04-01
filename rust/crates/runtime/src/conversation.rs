@@ -273,6 +273,9 @@ where
             }
         }
 
+        // Fire notification hooks at end of turn.
+        let _notification_result = self.hook_runner.run_notification();
+
         let auto_compaction = self.maybe_auto_compact();
 
         Ok(TurnSummary {

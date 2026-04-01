@@ -54,9 +54,43 @@ pub struct RuntimeFeatureConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HookEntry {
+    pub command: String,
+    pub only_tool_names: Option<Vec<String>>,
+    pub exclude_tool_names: Option<Vec<String>>,
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookEntryConfig {
+    Simple(String),
+    Rich(HookEntry),
+}
+
+impl HookEntryConfig {
+    #[must_use]
+    pub fn into_entry(self) -> HookEntry {
+        match self {
+            Self::Simple(cmd) => HookEntry {
+                command: cmd,
+                ..HookEntry::default()
+            },
+            Self::Rich(entry) => entry,
+        }
+    }
+}
+
+impl From<String> for HookEntryConfig {
+    fn from(s: String) -> Self {
+        Self::Simple(s)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RuntimeHookConfig {
-    pre_tool_use: Vec<String>,
-    post_tool_use: Vec<String>,
+    pre_tool_use: Vec<HookEntryConfig>,
+    post_tool_use: Vec<HookEntryConfig>,
+    notification: Vec<HookEntryConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -381,19 +415,44 @@ impl RuntimeHookConfig {
     #[must_use]
     pub fn new(pre_tool_use: Vec<String>, post_tool_use: Vec<String>) -> Self {
         Self {
-            pre_tool_use,
-            post_tool_use,
+            pre_tool_use: pre_tool_use
+                .into_iter()
+                .map(HookEntryConfig::from)
+                .collect(),
+            post_tool_use: post_tool_use
+                .into_iter()
+                .map(HookEntryConfig::from)
+                .collect(),
+            notification: Vec::new(),
         }
     }
 
     #[must_use]
-    pub fn pre_tool_use(&self) -> &[String] {
+    pub fn new_rich(
+        pre_tool_use: Vec<HookEntryConfig>,
+        post_tool_use: Vec<HookEntryConfig>,
+        notification: Vec<HookEntryConfig>,
+    ) -> Self {
+        Self {
+            pre_tool_use,
+            post_tool_use,
+            notification,
+        }
+    }
+
+    #[must_use]
+    pub fn pre_tool_use(&self) -> &[HookEntryConfig] {
         &self.pre_tool_use
     }
 
     #[must_use]
-    pub fn post_tool_use(&self) -> &[String] {
+    pub fn post_tool_use(&self) -> &[HookEntryConfig] {
         &self.post_tool_use
+    }
+
+    #[must_use]
+    pub fn notification(&self) -> &[HookEntryConfig] {
+        &self.notification
     }
 }
 
@@ -504,6 +563,80 @@ fn parse_optional_model(root: &JsonValue) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn parse_hook_entry_array(
+    hooks: &BTreeMap<String, JsonValue>,
+    key: &str,
+    context: &str,
+) -> Result<Vec<HookEntryConfig>, ConfigError> {
+    let Some(value) = hooks.get(key) else {
+        return Ok(Vec::new());
+    };
+    let Some(array) = value.as_array() else {
+        return Err(ConfigError::Parse(format!(
+            "{context}: field {key} must be an array"
+        )));
+    };
+    array
+        .iter()
+        .map(|item| match item {
+            JsonValue::String(s) => Ok(HookEntryConfig::Simple(s.clone())),
+            JsonValue::Object(obj) => {
+                let command = obj
+                    .get("command")
+                    .and_then(JsonValue::as_str)
+                    .ok_or_else(|| {
+                        ConfigError::Parse(format!(
+                            "{context}: hook entry object must have a \"command\" string field"
+                        ))
+                    })?
+                    .to_owned();
+                let only_tool_names = obj
+                    .get("only_tool_names")
+                    .map(|v| json_value_to_string_vec(v, &format!("{context}.only_tool_names")))
+                    .transpose()?;
+                let exclude_tool_names = obj
+                    .get("exclude_tool_names")
+                    .map(|v| json_value_to_string_vec(v, &format!("{context}.exclude_tool_names")))
+                    .transpose()?;
+                let timeout_ms = obj
+                    .get("timeout_ms")
+                    .map(|v| match v {
+                        JsonValue::Number(n) => Ok((*n).cast_unsigned()),
+                        _ => Err(ConfigError::Parse(format!(
+                            "{context}: timeout_ms must be a number"
+                        ))),
+                    })
+                    .transpose()?;
+                Ok(HookEntryConfig::Rich(HookEntry {
+                    command,
+                    only_tool_names,
+                    exclude_tool_names,
+                    timeout_ms,
+                }))
+            }
+            _ => Err(ConfigError::Parse(format!(
+                "{context}: field {key} entries must be strings or objects"
+            ))),
+        })
+        .collect()
+}
+
+fn json_value_to_string_vec(value: &JsonValue, context: &str) -> Result<Vec<String>, ConfigError> {
+    let Some(array) = value.as_array() else {
+        return Err(ConfigError::Parse(format!(
+            "{context}: must be an array of strings"
+        )));
+    };
+    array
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| ConfigError::Parse(format!("{context}: must contain only strings")))
+        })
+        .collect()
+}
+
 fn parse_optional_hooks_config(root: &JsonValue) -> Result<RuntimeHookConfig, ConfigError> {
     let Some(object) = root.as_object() else {
         return Ok(RuntimeHookConfig::default());
@@ -513,10 +646,9 @@ fn parse_optional_hooks_config(root: &JsonValue) -> Result<RuntimeHookConfig, Co
     };
     let hooks = expect_object(hooks_value, "merged settings.hooks")?;
     Ok(RuntimeHookConfig {
-        pre_tool_use: optional_string_array(hooks, "PreToolUse", "merged settings.hooks")?
-            .unwrap_or_default(),
-        post_tool_use: optional_string_array(hooks, "PostToolUse", "merged settings.hooks")?
-            .unwrap_or_default(),
+        pre_tool_use: parse_hook_entry_array(hooks, "PreToolUse", "merged settings.hooks")?,
+        post_tool_use: parse_hook_entry_array(hooks, "PostToolUse", "merged settings.hooks")?,
+        notification: parse_hook_entry_array(hooks, "Notification", "merged settings.hooks")?,
     })
 }
 
@@ -829,8 +961,8 @@ fn deep_merge_objects(
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfigLoader, ConfigSource, McpServerConfig, McpTransport, ResolvedPermissionMode,
-        CLAUDE_CODE_SETTINGS_SCHEMA_NAME,
+        ConfigLoader, ConfigSource, HookEntryConfig, McpServerConfig, McpTransport,
+        ResolvedPermissionMode, CLAUDE_CODE_SETTINGS_SCHEMA_NAME,
     };
     use crate::json::JsonValue;
     use crate::sandbox::FilesystemIsolationMode;
@@ -932,8 +1064,14 @@ mod tests {
             .and_then(JsonValue::as_object)
             .expect("hooks object")
             .contains_key("PostToolUse"));
-        assert_eq!(loaded.hooks().pre_tool_use(), &["base".to_string()]);
-        assert_eq!(loaded.hooks().post_tool_use(), &["project".to_string()]);
+        assert_eq!(
+            loaded.hooks().pre_tool_use(),
+            &[HookEntryConfig::Simple("base".to_string())]
+        );
+        assert_eq!(
+            loaded.hooks().post_tool_use(),
+            &[HookEntryConfig::Simple("project".to_string())]
+        );
         assert!(loaded.mcp().get("home").is_some());
         assert!(loaded.mcp().get("project").is_some());
 

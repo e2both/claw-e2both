@@ -24,9 +24,9 @@ pub use compact::{
     get_compact_continuation_message, should_compact, CompactionConfig, CompactionResult,
 };
 pub use config::{
-    resolve_env_with_fallback, ConfigEntry, ConfigError, ConfigLoader, ConfigSource,
-    McpClaudeAiProxyServerConfig, McpConfigCollection, McpOAuthConfig, McpRemoteServerConfig,
-    McpSdkServerConfig, McpServerConfig, McpStdioServerConfig, McpTransport,
+    resolve_env_with_fallback, ConfigEntry, ConfigError, ConfigLoader, ConfigSource, HookEntry,
+    HookEntryConfig, McpClaudeAiProxyServerConfig, McpConfigCollection, McpOAuthConfig,
+    McpRemoteServerConfig, McpSdkServerConfig, McpServerConfig, McpStdioServerConfig, McpTransport,
     McpWebSocketServerConfig, OAuthConfig, ResolvedPermissionMode, RuntimeConfig,
     RuntimeFeatureConfig, RuntimeHookConfig, ScopedMcpServerConfig,
     CLAUDE_CODE_SETTINGS_SCHEMA_NAME,
